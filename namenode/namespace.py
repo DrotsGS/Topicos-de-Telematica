@@ -2,6 +2,11 @@
 
 Semana 7 lo terminas. Semana 12 lo pones detras de Raft sin cambiar
 esta interfaz.
+
+Las operaciones de borrado devuelven TRES valores: (ok, mensaje, huerfanos).
+La tercera es la lista de block_id que quedaron sin dueno. Hoy el NameNode
+solo la acumula en una cola; en la semana 11 esa cola se vacia mandando
+DeleteCommand por piggyback en la respuesta al heartbeat.
 """
 
 import time
@@ -20,6 +25,7 @@ class Node:
     created_at: float = field(default_factory=time.time)
     children: dict = field(default_factory=dict)   # solo si is_dir
     blocks: list = field(default_factory=list)     # solo si es archivo
+    lease_id: str = ""                             # solo si UNDER_CONSTRUCTION
 
 
 class Namespace:
@@ -64,14 +70,67 @@ class Namespace:
         return [c for c in node.children.values()
                 if c.is_dir or c.state == COMMITTED]
 
-    # TODO semana 7: rmdir(path)
-    #   Decide: error si el directorio no esta vacio, o borrado recursivo?
-    #   Sea cual sea, va al log de decisiones.
+    def stat(self, path):
+        """Devuelve el Node o None si no existe.
 
-    # TODO semana 7: rm(path)
-    #   Pregunta dificil: que pasa si borran un archivo que otro esta
-    #   subiendo (UNDER_CONSTRUCTION con lease activo)? Esa es tu primera
-    #   decision real de consistencia.
+        A diferencia de ls, stat SI ve los archivos en construccion: es la
+        unica forma de diagnosticar una subida que quedo a medias.
+        """
+        return self.resolve(path)
 
-    # TODO semana 7: stat(path)
+    def rmdir(self, path, recursivo=False):
+        """Borra un directorio. D5: por defecto exige que este vacio.
+
+        El parametro recursivo ya esta en la firma aunque el protocolo
+        todavia no tenga como pedirlo (PathRequest no lleva el flag).
+        Cuando se agregue al .proto, la logica no cambia.
+        """
+        nodo = self.resolve(path)
+        if nodo is None:
+            return False, "no existe", []
+        if not nodo.is_dir:
+            return False, "no es un directorio", []
+        if nodo is self.root:
+            return False, "no se puede borrar la raiz", []
+        if nodo.children and not recursivo:
+            return False, "el directorio no esta vacio", []
+
+        huerfanos = self._recolectar_bloques(nodo)
+        padre, nombre = self.parent_of(path)
+        del padre.children[nombre]
+        return True, "ok", huerfanos
+
+    def rm(self, path):
+        """Borra un archivo. D6 opcion (b): el rm siempre gana.
+
+        Si el archivo estaba UNDER_CONSTRUCTION, el nodo desaparece y con
+        el su lease. El cliente que estuviera subiendo se entera cuando su
+        Complete falle con FAILED_PRECONDITION. Los bloques ya escritos
+        quedan huerfanos y se agendan para borrado.
+
+        Un path no puede quedar bloqueado para siempre por un cliente que
+        se murio, y eso importa mas que unos bloques huerfanos temporales.
+        """
+        nodo = self.resolve(path)
+        if nodo is None:
+            return False, "no existe", []
+        if nodo.is_dir:
+            return False, "es un directorio, usa rmdir", []
+
+        huerfanos = list(nodo.blocks)
+        en_construccion = nodo.state == UNDER_CONSTRUCTION
+        padre, nombre = self.parent_of(path)
+        del padre.children[nombre]
+        msg = "ok (se cancelo una subida en curso)" if en_construccion else "ok"
+        return True, msg, huerfanos
+
+    def _recolectar_bloques(self, nodo):
+        """Todos los block_id del subarbol. Para el borrado diferido."""
+        if not nodo.is_dir:
+            return list(nodo.blocks)
+        salida = []
+        for hijo in nodo.children.values():
+            salida.extend(self._recolectar_bloques(hijo))
+        return salida
+
     # TODO semana 8: create / complete / abort / open
