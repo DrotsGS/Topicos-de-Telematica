@@ -11,6 +11,7 @@ Semana 7: Rmdir, Rm y Stat, con el mapeo uniforme a StatusCode.
 import os
 import sys
 import time
+import uuid
 from concurrent import futures
 
 import grpc
@@ -19,8 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.pb import dfsha_pb2, dfsha_pb2_grpc          # noqa: E402
 from common.config import env                            # noqa: E402
-from common.interfaces import build_auth, RoundRobinPlacer  # noqa: E402
-from namenode.namespace import Namespace                  # noqa: E402
+from common.interfaces import (                            # noqa: E402
+    build_auth, RoundRobinPlacer, BLOCK_SIZE, REPLICATION_FACTOR)
+from namenode.namespace import Namespace, COMMITTED, UNDER_CONSTRUCTION  # noqa: E402
 
 NODE_ID = env("NODE_ID", "nn-1")
 PORT = env("PORT", "50051")
@@ -51,6 +53,8 @@ CODIGOS = {
     "no se puede borrar la raiz": grpc.StatusCode.FAILED_PRECONDITION,
     "no es un directorio": grpc.StatusCode.INVALID_ARGUMENT,
     "es un directorio, usa rmdir": grpc.StatusCode.INVALID_ARGUMENT,
+    "el lease ya no es valido": grpc.StatusCode.FAILED_PRECONDITION,
+    "el archivo ya esta completo": grpc.StatusCode.FAILED_PRECONDITION,
 }
 
 
@@ -60,6 +64,13 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         self.auth = build_auth()
         self.placer = RoundRobinPlacer()
         self.datanodes = {}   # node_id -> {addr, free_bytes, last_seen}
+
+        # El block map: block_id -> {index, size, datanodes, sha256}.
+        # Va aparte del namespace a proposito, son dos estructuras
+        # distintas. El namespace dice que archivos hay; el block map,
+        # donde estan sus bloques.
+        self.block_map = {}
+        self.leases = {}      # lease_id -> path
 
         # Bloques que perdieron a su dueno y todavia ocupan disco en algun
         # DataNode. Hoy solo se acumulan. En la semana 11 el Heartbeat
@@ -86,8 +97,25 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
     def _agendar_borrado(self, huerfanos):
         if huerfanos:
             self.pendientes_borrado.extend(huerfanos)
+            for block_id in huerfanos:
+                self.block_map.pop(block_id, None)
             print("[GC] {} bloques huerfanos agendados ({} en cola)".format(
                 len(huerfanos), len(self.pendientes_borrado)))
+
+    def _purgar_leases(self):
+        """Un borrado puede haberse llevado por delante un archivo en
+        construccion (D6). Su lease deja de existir con el."""
+        vigentes = {}
+        for lease_id, path in self.leases.items():
+            nodo = self.ns.stat(path)
+            if nodo is not None and nodo.lease_id == lease_id:
+                vigentes[lease_id] = path
+        self.leases = vigentes
+
+    def vivos(self):
+        """DataNodes que se pueden usar. En la semana 10 filtra por
+        last_seen; hoy todavia son todos los que se registraron."""
+        return list(self.datanodes.keys())
 
     # ---------------- RF1: namespace ----------------
 
@@ -148,6 +176,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         if not ok:
             self._fallar(context, msg)
         self._agendar_borrado(huerfanos)
+        self._purgar_leases()
         return dfsha_pb2.StatusResponse(ok=True, message=msg)
 
     def Rm(self, request, context):
@@ -157,11 +186,149 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         if not ok:
             self._fallar(context, msg)
         self._agendar_borrado(huerfanos)
+        self._purgar_leases()
         return dfsha_pb2.StatusResponse(ok=True, message=msg)
 
-    # TODO semana 8: Create, Complete, Abort, Open
-    #   Create asigna blockIDs con self.placer sobre self.datanodes vivos
-    #   y devuelve el lease. Complete hace el commit a COMMITTED.
+    # ---------------- RF2: escritura (WORM) ----------------
+
+    def Create(self, request, context):
+        """Otorga el lease y dice donde va cada bloque.
+
+        No mueve un solo byte: el NameNode nunca toca el plano de datos.
+        Devuelve direcciones (host:puerto) y no node_id, porque es el
+        cliente quien va a marcarlas.
+        """
+        self._autorizar(request.token, context)
+
+        if self.ns.stat(request.path) is not None:
+            # WORM: no se sobreescribe. Para reemplazar hay que borrar
+            # primero, y eso incluye limpiar una subida que quedo a medias.
+            self._fallar(context, "ya existe")
+        padre, _ = self.ns.parent_of(request.path)
+        if padre is None or not padre.is_dir:
+            self._fallar(context, "el directorio padre no existe")
+
+        vivos = self.vivos()
+        if not vivos:
+            context.abort(grpc.StatusCode.UNAVAILABLE,
+                          "no hay DataNodes vivos")
+
+        # El ultimo bloque es parcial. Con un contador explicito, y no
+        # dividiendo, no hay forma de equivocarse en su tamano.
+        asignaciones = []
+        restante = request.size
+        indice = 0
+        while restante > 0:
+            tam = min(BLOCK_SIZE, restante)
+            block_id = uuid.uuid4().hex
+            destinos = self.placer.place(block_id, vivos, REPLICATION_FACTOR)
+            self.block_map[block_id] = {
+                "index": indice, "size": tam,
+                "datanodes": destinos, "sha256": ""}
+            asignaciones.append(dfsha_pb2.BlockAssignment(
+                block_id=block_id, index=indice, size=tam,
+                datanodes=[self.datanodes[n]["addr"] for n in destinos],
+                access_token=""))     # TODO semana 12: firmado por el NameNode
+            restante -= tam
+            indice += 1
+
+        lease_id = uuid.uuid4().hex
+        ok, msg = self.ns.create(
+            request.path, request.size,
+            [a.block_id for a in asignaciones], lease_id)
+        if not ok:
+            for a in asignaciones:
+                self.block_map.pop(a.block_id, None)
+            self._fallar(context, msg)
+
+        self.leases[lease_id] = request.path
+        print("[Create] {}  {} bytes  {} bloques  lease={}".format(
+            request.path, request.size, len(asignaciones), lease_id[:8]))
+        return dfsha_pb2.CreateResponse(
+            lease_id=lease_id, blocks=asignaciones)
+
+    def Complete(self, request, context):
+        """El commit. Aqui el archivo se vuelve visible e inmutable.
+
+        CompleteRequest no lleva token: el lease ES la credencial. Se
+        entrego a un usuario ya autenticado en el Create y solo sirve
+        para ese path, asi que vale como capability.
+        """
+        nodo = self.ns.stat(request.path)
+        if nodo is not None and nodo.state == UNDER_CONSTRUCTION:
+            # Verifica que llegue el checksum de cada bloque antes de
+            # dar el archivo por bueno.
+            llegaron = {c.block_id for c in request.checksums}
+            faltan = [b for b in nodo.blocks if b not in llegaron]
+            if faltan:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "faltan los checksums de {} bloques".format(len(faltan)))
+
+        ok, msg = self.ns.complete(request.path, request.lease_id)
+        if not ok:
+            print("[Complete] {} -> {}".format(request.path, msg))
+            self._fallar(context, msg)
+
+        for c in request.checksums:
+            if c.block_id in self.block_map:
+                self.block_map[c.block_id]["sha256"] = c.sha256
+        self.leases.pop(request.lease_id, None)
+        print("[Complete] {} -> COMMITTED".format(request.path))
+        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+
+    def Abort(self, request, context):
+        self._autorizar(request.token, context)
+        path = self.leases.get(request.lease_id)
+        if path is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "lease desconocido")
+
+        ok, msg, huerfanos = self.ns.abort(path, request.lease_id)
+        self.leases.pop(request.lease_id, None)
+        if not ok:
+            self._fallar(context, msg)
+        self._agendar_borrado(huerfanos)
+        print("[Abort] {} cancelado".format(path))
+        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+
+    # ---------------- RF2: lectura ----------------
+
+    def Open(self, request, context):
+        """Donde esta cada bloque, en orden. El cliente hace el resto."""
+        self._autorizar(request.token, context)
+        nodo = self.ns.stat(request.path)
+        if nodo is None:
+            self._fallar(context, "no existe")
+        if nodo.is_dir:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                          "es un directorio")
+        if nodo.state != COMMITTED:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION,
+                          "el archivo todavia esta en construccion")
+
+        vivos = set(self.vivos())
+        ubicaciones = []
+        for block_id in nodo.blocks:
+            meta = self.block_map.get(block_id)
+            if meta is None:
+                context.abort(grpc.StatusCode.INTERNAL,
+                              "no hay ubicacion para el bloque " + block_id)
+            # Las direcciones se resuelven AL LEER, no al escribir: un
+            # DataNode que se reinicio puede anunciarse en otra direccion.
+            direcciones = [self.datanodes[n]["addr"]
+                           for n in meta["datanodes"] if n in vivos]
+            if not direcciones:
+                context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "ningun DataNode vivo tiene el bloque " + block_id)
+            ubicaciones.append(dfsha_pb2.BlockLocation(
+                block_id=block_id, index=meta["index"], size=meta["size"],
+                datanodes=direcciones, sha256=meta["sha256"],
+                access_token=""))
+
+        ubicaciones.sort(key=lambda b: b.index)
+        print("[Open] {}  {} bloques".format(request.path, len(ubicaciones)))
+        return dfsha_pb2.OpenResponse(size=nodo.size, blocks=ubicaciones)
 
 
 class ControlService(dfsha_pb2_grpc.ControlServiceServicer):

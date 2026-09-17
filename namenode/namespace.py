@@ -124,6 +124,53 @@ class Namespace:
         msg = "ok (se cancelo una subida en curso)" if en_construccion else "ok"
         return True, msg, huerfanos
 
+    # ---------------- RF2: ciclo de vida de escritura (WORM) ----------------
+
+    def create(self, path, size, block_ids, lease_id):
+        """Crea el archivo UNDER_CONSTRUCTION: existe, pero es invisible.
+
+        Invisible para ls, no para stat. Solo el Complete lo hace visible,
+        y desde ahi es inmutable: eso es el WORM.
+        """
+        padre, nombre = self.parent_of(path)
+        if padre is None or not padre.is_dir:
+            return False, "el directorio padre no existe"
+        if nombre in padre.children:
+            return False, "ya existe"
+        padre.children[nombre] = Node(
+            name=nombre, is_dir=False, size=size,
+            state=UNDER_CONSTRUCTION, blocks=list(block_ids),
+            lease_id=lease_id)
+        return True, "ok"
+
+    def complete(self, path, lease_id):
+        """El commit. Un archivo o no existe, o existe completo."""
+        nodo = self.resolve(path)
+        if nodo is None:
+            # D6: puede que le hayan hecho rm mientras subia.
+            return False, "el lease ya no es valido"
+        if nodo.is_dir:
+            return False, "es un directorio, usa rmdir"
+        if nodo.state == COMMITTED:
+            return False, "el archivo ya esta completo"
+        if nodo.lease_id != lease_id:
+            return False, "el lease ya no es valido"
+        nodo.state = COMMITTED
+        nodo.lease_id = ""
+        return True, "ok"
+
+    def abort(self, path, lease_id):
+        """Cancela una subida. Los bloques ya escritos quedan huerfanos."""
+        nodo = self.resolve(path)
+        if nodo is None:
+            return False, "el lease ya no es valido", []
+        if nodo.state != UNDER_CONSTRUCTION or nodo.lease_id != lease_id:
+            return False, "el lease ya no es valido", []
+        huerfanos = list(nodo.blocks)
+        padre, nombre = self.parent_of(path)
+        del padre.children[nombre]
+        return True, "ok", huerfanos
+
     def _recolectar_bloques(self, nodo):
         """Todos los block_id del subarbol. Para el borrado diferido."""
         if not nodo.is_dir:
@@ -133,4 +180,4 @@ class Namespace:
             salida.extend(self._recolectar_bloques(hijo))
         return salida
 
-    # TODO semana 8: create / complete / abort / open
+

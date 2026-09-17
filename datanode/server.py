@@ -30,17 +30,24 @@ NAMENODE = env("NAMENODE_ADDR", "localhost:50051")
 DATA_DIR = data_dir(NODE_ID)
 
 
-def ruta_bloque(block_id):
-    return os.path.join(DATA_DIR, "blk_" + block_id)
-
-
-def ruta_temporal(block_id):
-    # Los tmp_ no empiezan por blk_, asi que el heartbeat no los cuenta
-    # como bloques hasta que esten completos.
-    return os.path.join(DATA_DIR, "tmp_" + block_id)
-
-
 class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
+    """El almacen de bloques.
+
+    La carpeta se recibe por parametro y no se lee del entorno aqui
+    dentro: asi las pruebas pueden levantar varios DataNodes en un mismo
+    proceso, cada uno con su disco.
+    """
+
+    def __init__(self, carpeta=None):
+        self.carpeta = carpeta or DATA_DIR
+
+    def ruta_bloque(self, block_id):
+        return os.path.join(self.carpeta, "blk_" + block_id)
+
+    def ruta_temporal(self, block_id):
+        # Los tmp_ no empiezan por blk_, asi que el heartbeat no los
+        # cuenta como bloques hasta que esten completos.
+        return os.path.join(self.carpeta, "tmp_" + block_id)
 
     def PutBlock(self, request_iterator, context):
         """Recibe un bloque por streaming y lo deja en disco.
@@ -66,7 +73,7 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
                         context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                                       "el header llego dos veces")
                     header = chunk.header
-                    temporal = ruta_temporal(header.block_id)
+                    temporal = self.ruta_temporal(header.block_id)
                     f = open(temporal, "wb")
                     continue
 
@@ -95,7 +102,7 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
 
             f.close()
             f = None
-            os.replace(temporal, ruta_bloque(header.block_id))
+            os.replace(temporal, self.ruta_bloque(header.block_id))
             sha = digest.hexdigest()
             print("[PutBlock] {}  {} bytes  sha256={}".format(
                 header.block_id, recibidos, sha[:12]))
@@ -114,7 +121,7 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
 
     def GetBlock(self, request, context):
         """Devuelve el bloque en trozos de CHUNK_SIZE. Es un generador."""
-        ruta = ruta_bloque(request.block_id)
+        ruta = self.ruta_bloque(request.block_id)
         if not os.path.exists(ruta):
             context.abort(grpc.StatusCode.NOT_FOUND,
                           "este DataNode no tiene el bloque " + request.block_id)

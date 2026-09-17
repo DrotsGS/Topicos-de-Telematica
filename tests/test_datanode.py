@@ -21,12 +21,11 @@ CHUNK = 64 * 1024
 
 
 @pytest.fixture
-def datanodo(tmp_path, monkeypatch):
+def datanodo(tmp_path):
     """Un DataNode de verdad, con sus bloques en un directorio temporal."""
-    monkeypatch.setattr(dn, "DATA_DIR", str(tmp_path))
     servidor = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(
-        dn.DataNodeService(), servidor)
+        dn.DataNodeService(str(tmp_path)), servidor)
     puerto = servidor.add_insecure_port("localhost:0")
     servidor.start()
 
