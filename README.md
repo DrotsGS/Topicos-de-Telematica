@@ -9,7 +9,7 @@ colocacion por hash y semantica WORM.
 
 ---
 
-## El diseno en una frase
+## Arquitectura 
 
 El cliente le pregunta al NameNode **donde** estan los bloques, y despues
 habla directo con los DataNodes para mover los bytes. Los datos nunca
