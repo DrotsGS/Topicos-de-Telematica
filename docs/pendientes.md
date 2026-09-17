@@ -16,24 +16,25 @@ Marca lo que vas cerrando. Lo que traigas nuevo cada semana se agrega aqui.
 
 ## Semana 7 - Namespace completo y especificacion
 
-- [ ] `rmdir` en namespace.py  (decidir: recursivo o error si no esta vacio)
-- [ ] `rm` en namespace.py     (decidir: que pasa con un lease activo)
-- [ ] `stat` en namespace.py
-- [ ] Conectar Rmdir, Rm y Stat en namenode/server.py con su StatusCode
-- [ ] Subcomandos rmdir, rm y stat en el cliente
-- [ ] FileAuth: usuarios en archivo, reemplaza a NoopAuth
+- [x] `rmdir` en namespace.py  (decidir: recursivo o error si no esta vacio)
+- [x] `rm` en namespace.py     (decidir: que pasa con un lease activo)
+- [x] `stat` en namespace.py
+- [x] Conectar Rmdir, Rm y Stat en namenode/server.py con su StatusCode
+- [x] Subcomandos rmdir, rm y stat en el cliente
+- [x] FileAuth: usuarios en archivo, reemplaza a NoopAuth
 - [ ] **Entregable: especificacion definitiva del proyecto**
 
 ## Semana 8 - Hito 1: put y get
 
-- [ ] Cliente parte el archivo en bloques de BLOCK_SIZE
-- [ ] DataNode.PutBlock: recibe el stream, escribe a disco, calcula sha256
-- [ ] DataNode.GetBlock: lee y hace yield de chunks
-- [ ] NameNode.Create: asigna blockIDs y ubicaciones, otorga lease
-- [ ] NameNode.Complete: commit a COMMITTED
-- [ ] NameNode.Open: devuelve la lista ordenada de bloques
-- [ ] Cliente reensambla POR OFFSET a disco, nunca acumulando en memoria
-- [ ] Prueba: subir 500 MB, borrar local, bajar, comparar hash
+- [x] Cliente parte el archivo en bloques de BLOCK_SIZE
+- [x] DataNode.PutBlock: recibe el stream, escribe a disco, calcula sha256
+- [x] DataNode.GetBlock: lee y hace yield de chunks
+- [x] NameNode.Create: asigna blockIDs y ubicaciones, otorga lease
+- [x] NameNode.Complete: commit a COMMITTED
+- [x] NameNode.Open: devuelve la lista ordenada de bloques
+- [x] Cliente reensambla POR OFFSET a disco, nunca acumulando en memoria
+- [x] Prueba: subir 500 MB, borrar local, bajar, comparar hash
+      (scripts/prueba_hito1.py, y 98 pruebas automaticas en tests/)
 
 ## Semana 9 - Holgura
 
@@ -44,17 +45,19 @@ Marca lo que vas cerrando. Lo que traigas nuevo cada semana se agrega aqui.
 
 ## Semana 10 - Hito 2: varios DataNodes
 
-- [ ] ConsistentHashPlacer
-- [ ] BlockReport y BlockReceived
-- [ ] Lectura y escritura en paralelo
-- [ ] Separar el .proto en tres archivos
+- [x] ConsistentHashPlacer
+- [x] BlockReport y BlockReceived
+- [x] Lectura y escritura en paralelo
+- [x] Separar el .proto en cuatro archivos (comun + los tres servicios)
 - [ ] **Entregable: especificacion de protocolos**
 
 ## Semana 11 - Replicacion
 
 - [ ] ParallelReplicator (v1)
-- [ ] Deteccion de nodo muerto
+- [x] Deteccion de nodo muerto (adelantada a la semana 10)
 - [ ] Lectura con failover a otra replica
+      (el bucle sobre datanodes ya esta puesto en el cliente; hoy la
+      lista trae una sola direccion porque REPLICATION_FACTOR = 1)
 - [ ] Mejora pendiente a proposito: PipelineReplicator
 
 ## Semana 12 - Hito 3: HA, consistencia y seguridad
