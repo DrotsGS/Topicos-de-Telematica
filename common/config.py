@@ -14,6 +14,29 @@ def env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def token_file() -> str:
+    """Donde el cliente guarda el token del ultimo login."""
+    return os.environ.get(
+        "DFSHA_TOKEN_FILE",
+        os.path.join(os.path.expanduser("~"), ".dfsha_token"))
+
+
+def read_token() -> str:
+    """Token de la variable de entorno, o el del ultimo login.
+
+    La variable gana: asi se puede correr como otro usuario sin borrar
+    el archivo.
+    """
+    desde_env = os.environ.get("DFSHA_TOKEN")
+    if desde_env:
+        return desde_env
+    try:
+        with open(token_file(), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def data_dir(node_id: str) -> str:
     """Carpeta de bloques del DataNode.
 

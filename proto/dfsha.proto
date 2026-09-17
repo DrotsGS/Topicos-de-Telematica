@@ -34,6 +34,11 @@ service NameNodeService {
   // --- RF2: lectura ---
   rpc Open (PathRequest) returns (OpenResponse);
 
+  // --- autenticacion (semana 7) ---
+  // El login tiene que ocurrir en el servidor: si el cliente firmara su
+  // propio token necesitaria el secreto, y el token no valdria nada.
+  rpc Login (LoginRequest) returns (LoginResponse);
+
   // --- salud y descubrimiento de lider (semana 12) ---
   rpc Ping (Empty) returns (PingResponse);
 }
@@ -79,6 +84,18 @@ message PingResponse {
   string node_id     = 1;
   bool   is_leader   = 2;   // semana 12: si es false, leader_addr apunta al lider
   string leader_addr = 3;
+}
+
+// --- autenticacion ---
+
+message LoginRequest {
+  string user     = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string token      = 1;
+  int64  expires_at = 2;   // epoch en segundos; informativo para el cliente
 }
 
 // --- namespace ---
