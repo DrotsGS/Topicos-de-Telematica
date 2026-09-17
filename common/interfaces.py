@@ -7,6 +7,7 @@ Cuando quieras mejorar algo, cambias UNA clase de aqui y nada mas.
 
 from abc import ABC, abstractmethod
 import base64
+import bisect
 import hashlib
 import hmac
 import itertools
@@ -55,10 +56,74 @@ class RoundRobinPlacer(BlockPlacer):
         return [datanodes[(start + i) % len(datanodes)] for i in range(k)]
 
 
-# TODO semana 10: ConsistentHashPlacer con nodos virtuales.
-#   hash(block_id) -> punto del anillo -> los n siguientes nodos distintos.
-#   Recuerda: el NameNode PERSISTE donde quedo cada bloque, no recalcula
-#   el hash al leer. Eso le permite desviarse si un nodo esta lleno.
+class ConsistentHashPlacer(BlockPlacer):
+    """Anillo de hash consistente con nodos virtuales.
+
+    Por que no hash % N: con modulo, agregar un DataNode remapea casi
+    todas las claves (de hash % 4 a hash % 5 practicamente ningun bloque
+    cae donde estaba). Con un anillo solo se mueve alrededor de 1/N.
+
+    Cada nodo fisico se replica VNODOS veces en el anillo. Sin nodos
+    virtuales, con pocos nodos el reparto queda muy desbalanceado: uno
+    puede quedarse con el 60% de las claves por pura suerte de donde
+    cayo su hash.
+
+    OJO: esto es politica de colocacion INICIAL, no mecanismo de
+    busqueda. El NameNode persiste donde quedo cada bloque y no
+    recalcula el hash al leer; por eso puede desviarse del anillo si un
+    nodo esta lleno o caido sin que el sistema se pierda.
+    """
+
+    VNODOS = 150
+
+    def __init__(self, nodos=None):
+        self._anillo = {}       # posicion -> nodo fisico
+        self._posiciones = []   # ordenado, para bisect
+        for n in (nodos or []):
+            self.agregar(n)
+
+    @staticmethod
+    def _hash(clave):
+        return int(hashlib.md5(clave.encode()).hexdigest()[:8], 16)
+
+    def agregar(self, nodo):
+        for i in range(self.VNODOS):
+            self._anillo[self._hash("{}#{}".format(nodo, i))] = nodo
+        self._posiciones = sorted(self._anillo.keys())
+
+    def quitar(self, nodo):
+        for i in range(self.VNODOS):
+            self._anillo.pop(self._hash("{}#{}".format(nodo, i)), None)
+        self._posiciones = sorted(self._anillo.keys())
+
+    def _sincronizar(self, vivos):
+        for nodo in vivos - set(self._anillo.values()):
+            self.agregar(nodo)
+        for nodo in set(self._anillo.values()) - vivos:
+            self.quitar(nodo)
+
+    def place(self, block_id, datanodes, n):
+        """Los n primeros nodos FISICOS distintos, en sentido horario."""
+        vivos = set(datanodes)
+        self._sincronizar(vivos)
+        if not self._posiciones:
+            return []
+
+        inicio = bisect.bisect_left(self._posiciones, self._hash(block_id))
+        salida = []
+        total = len(self._posiciones)
+        cuantos = min(n, len(vivos))
+        for k in range(total):
+            nodo = self._anillo[self._posiciones[(inicio + k) % total]]
+            # Caminando el anillo te topas varias veces con el mismo nodo
+            # fisico (son sus vnodos). Si no se filtra, las 3 "replicas"
+            # pueden caer en la misma maquina, que es justo lo contrario
+            # de replicar.
+            if nodo not in salida:
+                salida.append(nodo)
+            if len(salida) == cuantos:
+                break
+        return salida
 
 
 # ---------------------------------------------------------------------

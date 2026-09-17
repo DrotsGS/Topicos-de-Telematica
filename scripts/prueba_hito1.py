@@ -59,6 +59,8 @@ def levantar(carpeta_bloques):
 
     nn = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(servicio, nn)
+    dfsha_pb2_grpc.add_ControlServiceServicer_to_server(
+        nn_server.ControlService(servicio), nn)
     puerto_nn = nn.add_insecure_port("localhost:0")
     nn.start()
 
@@ -68,12 +70,13 @@ def levantar(carpeta_bloques):
     puerto_dn = dnodo.add_insecure_port("localhost:0")
     dnodo.start()
 
-    servicio.datanodes["dn-1"] = {
-        "addr": "localhost:{}".format(puerto_dn),
-        "free_bytes": shutil.disk_usage(carpeta_bloques).free,
-        "num_blocks": 0}
-
     canal = grpc.insecure_channel("localhost:{}".format(puerto_nn))
+    # El DataNode se registra por heartbeat, como en la vida real.
+    dfsha_pb2_grpc.ControlServiceStub(canal).Heartbeat(
+        dfsha_pb2.HeartbeatRequest(
+            node_id="dn-1", addr="localhost:{}".format(puerto_dn),
+            free_bytes=shutil.disk_usage(carpeta_bloques).free,
+            num_blocks=0))
     return servicio, dfsha_pb2_grpc.NameNodeServiceStub(canal), [nn, dnodo]
 
 

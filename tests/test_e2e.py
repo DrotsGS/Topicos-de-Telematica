@@ -77,7 +77,7 @@ def sistema(tmp_path, monkeypatch, request):
     servicio = nn_server.NameNodeService()
     servicio.auth = FileAuth(USUARIOS, "secreto-de-prueba")
 
-    servidores, canales, carpetas = [], [], {}
+    servidores, canales, carpetas, direcciones = [], [], {}, {}
 
     nn = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(servicio, nn)
@@ -94,12 +94,17 @@ def sistema(tmp_path, monkeypatch, request):
         carpetas[node_id] = carpeta
         servidor, direccion = _levantar_datanode(node_id, carpeta)
         servidores.append(servidor)
-        # Se registra como lo haria su heartbeat.
-        servicio.datanodes[node_id] = {
-            "addr": direccion, "free_bytes": 10 ** 12, "num_blocks": 0}
+        direcciones[node_id] = direccion
 
     canal = grpc.insecure_channel("localhost:{}".format(puerto_nn))
     canales.append(canal)
+    control = dfsha_pb2_grpc.ControlServiceStub(canal)
+    for node_id, direccion in direcciones.items():
+        # Se registran como lo hace un DataNode de verdad: por heartbeat.
+        control.Heartbeat(dfsha_pb2.HeartbeatRequest(
+            node_id=node_id, addr=direccion,
+            free_bytes=10 ** 12, num_blocks=0))
+
     stub = dfsha_pb2_grpc.NameNodeServiceStub(canal)
     token = stub.Login(dfsha_pb2.LoginRequest(
         user="drots", password="dfsha")).token

@@ -38,8 +38,16 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
     proceso, cada uno con su disco.
     """
 
-    def __init__(self, carpeta=None):
+    def __init__(self, carpeta=None, avisar=None):
         self.carpeta = carpeta or DATA_DIR
+        # Callback para avisarle al NameNode que llego un bloque. Se
+        # inyecta para que las pruebas puedan levantar un DataNode sin
+        # NameNode detras.
+        self.avisar = avisar
+
+    def bloques(self):
+        return [f[4:] for f in os.listdir(self.carpeta)
+                if f.startswith("blk_")]
 
     def ruta_bloque(self, block_id):
         return os.path.join(self.carpeta, "blk_" + block_id)
@@ -106,6 +114,11 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
             sha = digest.hexdigest()
             print("[PutBlock] {}  {} bytes  sha256={}".format(
                 header.block_id, recibidos, sha[:12]))
+            if self.avisar is not None:
+                # BlockReceived: el NameNode se entera por el DataNode, no
+                # por el cliente. El que sabe que el bloque esta en disco
+                # es quien lo escribio.
+                self.avisar(header.block_id, sha)
             # TODO semana 11: reenviar a header.pipeline[0] si viene lleno
             return dfsha_pb2.PutBlockResponse(ok=True, sha256=sha, message="ok")
 
@@ -143,33 +156,73 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
     # TODO semana 11: ReplicateTo, para el pipeline DataNode -> DataNode
 
 
-def heartbeat_loop():
+INTERVALO_HEARTBEAT = 3
+INTERVALO_BLOCK_REPORT = 60
+
+
+def control_stub():
+    return dfsha_pb2_grpc.ControlServiceStub(grpc.insecure_channel(NAMENODE))
+
+
+def heartbeat_loop(servicio):
     """El DataNode reporta su propia direccion.
 
     Solo el es capaz de saber por donde lo alcanzan los clientes: en
     Windows es localhost, en Docker el nombre del servicio, en EC2 una
     IP privada. Por eso el NameNode no la adivina, se la preguntan.
     """
-    stub = dfsha_pb2_grpc.ControlServiceStub(grpc.insecure_channel(NAMENODE))
+    stub = control_stub()
     while True:
         try:
-            free = shutil.disk_usage(DATA_DIR).free
-            n = len([f for f in os.listdir(DATA_DIR) if f.startswith("blk_")])
+            free = shutil.disk_usage(servicio.carpeta).free
             resp = stub.Heartbeat(dfsha_pb2.HeartbeatRequest(
-                node_id=NODE_ID, addr=ADDR, free_bytes=free, num_blocks=n))
+                node_id=NODE_ID, addr=ADDR, free_bytes=free,
+                num_blocks=len(servicio.bloques())))
             for cmd in resp.commands:
                 print("[comando piggyback] {}".format(cmd))   # TODO semana 11
         except grpc.RpcError as e:
             print("[heartbeat] NameNode no responde: {}".format(e.code().name))
-        time.sleep(3)
+        time.sleep(INTERVALO_HEARTBEAT)
+
+
+def block_report_loop(servicio):
+    """La lista completa de bloques, al arrancar y cada minuto.
+
+    Con esto el NameNode reconstruye el mapa de ubicaciones sin tener que
+    persistirlo: si se reinicia, en un minuto sabe donde esta todo.
+    """
+    stub = control_stub()
+    while True:
+        try:
+            ids = servicio.bloques()
+            stub.BlockReport(dfsha_pb2.BlockReportRequest(
+                node_id=NODE_ID, block_ids=ids))
+            print("[BlockReport] se reportaron {} bloques".format(len(ids)))
+        except grpc.RpcError as e:
+            print("[BlockReport] no se pudo reportar: {}".format(e.code().name))
+        time.sleep(INTERVALO_BLOCK_REPORT)
+
+
+def avisar_bloque_recibido(block_id, sha):
+    try:
+        control_stub().BlockReceived(dfsha_pb2.BlockReceivedRequest(
+            node_id=NODE_ID, block_id=block_id, sha256=sha))
+    except grpc.RpcError as e:
+        # Que falle el aviso no invalida el bloque: el proximo
+        # BlockReport lo vuelve a contar.
+        print("[BlockReceived] no se pudo avisar: {}".format(e.code().name))
 
 
 def serve():
     os.makedirs(DATA_DIR, exist_ok=True)
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    servicio = DataNodeService(DATA_DIR, avisar=avisar_bloque_recibido)
+    threading.Thread(target=heartbeat_loop, args=(servicio,),
+                     daemon=True).start()
+    threading.Thread(target=block_report_loop, args=(servicio,),
+                     daemon=True).start()
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(DataNodeService(), server)
+    dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(servicio, server)
     server.add_insecure_port("[::]:" + PORT)
     server.start()
     print("DataNode {} escuchando en el puerto {}".format(NODE_ID, PORT))

@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import uuid
+import threading
 from concurrent import futures
 
 import grpc
@@ -21,11 +22,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.pb import dfsha_pb2, dfsha_pb2_grpc          # noqa: E402
 from common.config import env                            # noqa: E402
 from common.interfaces import (                            # noqa: E402
-    build_auth, RoundRobinPlacer, BLOCK_SIZE, REPLICATION_FACTOR)
+    build_auth, ConsistentHashPlacer, BLOCK_SIZE, REPLICATION_FACTOR)
 from namenode.namespace import Namespace, COMMITTED, UNDER_CONSTRUCTION  # noqa: E402
 
 NODE_ID = env("NODE_ID", "nn-1")
 PORT = env("PORT", "50051")
+
+# Con heartbeats cada 3 s, 30 segundos son diez fallos seguidos: no se
+# declara muerto a un nodo por una hipo de la red.
+TIMEOUT_DATANODE = int(env("TIMEOUT_DATANODE", "30"))
+INTERVALO_VIGILANCIA = 10
 
 
 # ---------------------------------------------------------------------
@@ -62,7 +68,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
     def __init__(self):
         self.ns = Namespace()
         self.auth = build_auth()
-        self.placer = RoundRobinPlacer()
+        self.placer = ConsistentHashPlacer()
         self.datanodes = {}   # node_id -> {addr, free_bytes, last_seen}
 
         # El block map: block_id -> {index, size, datanodes, sha256}.
@@ -113,9 +119,20 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         self.leases = vigentes
 
     def vivos(self):
-        """DataNodes que se pueden usar. En la semana 10 filtra por
-        last_seen; hoy todavia son todos los que se registraron."""
-        return list(self.datanodes.keys())
+        """DataNodes de los que se supo hace menos de TIMEOUT_DATANODE.
+
+        Create usa esto y no datanodes.keys(): es un cambio de una linea
+        con consecuencias grandes, porque sin el el NameNode asigna
+        bloques a nodos muertos.
+        """
+        corte = time.time() - TIMEOUT_DATANODE
+        return [nid for nid, info in self.datanodes.items()
+                if info.get("last_seen", 0) > corte]
+
+    def muertos(self):
+        corte = time.time() - TIMEOUT_DATANODE
+        return [nid for nid, info in self.datanodes.items()
+                if info.get("last_seen", 0) <= corte]
 
     # ---------------- RF1: namespace ----------------
 
@@ -338,24 +355,89 @@ class ControlService(dfsha_pb2_grpc.ControlServiceServicer):
         self.nn = nn
 
     def Heartbeat(self, request, context):
-        nuevo = request.node_id not in self.nn.datanodes
+        anterior = self.nn.datanodes.get(request.node_id)
         self.nn.datanodes[request.node_id] = {
             "addr": request.addr,
             "free_bytes": request.free_bytes,
             "num_blocks": request.num_blocks,
+            "last_seen": time.time(),
         }
-        if nuevo:
+        if anterior is None:
             print("[Heartbeat] nuevo DataNode: {} en {}".format(
                 request.node_id, request.addr))
+        elif anterior.get("last_seen", 0) <= time.time() - TIMEOUT_DATANODE:
+            print("[Heartbeat] {} revivio".format(request.node_id))
         # TODO semana 11: aqui van los comandos piggyback (replicar, borrar)
         return dfsha_pb2.HeartbeatResponse()
 
-    # TODO semana 10: BlockReport, BlockReceived
+    def BlockReceived(self, request, context):
+        """El DataNode avisa que ya tiene un bloque.
+
+        Sirve para confirmar que quedo donde el NameNode esperaba: si un
+        nodo reporta un bloque que no se le asigno, se anota igual, porque
+        el que manda es el disco.
+        """
+        meta = self.nn.block_map.get(request.block_id)
+        if meta is None:
+            print("[BlockReceived] {} reporto un bloque desconocido: {}".format(
+                request.node_id, request.block_id))
+            return dfsha_pb2.StatusResponse(ok=True, message="bloque sin dueno")
+        if request.node_id not in meta["datanodes"]:
+            meta["datanodes"].append(request.node_id)
+        if request.sha256 and not meta["sha256"]:
+            meta["sha256"] = request.sha256
+        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+
+    def BlockReport(self, request, context):
+        """La lista completa de bloques de un DataNode.
+
+        Esto es lo que permite NO persistir las ubicaciones: el namespace
+        es lo que hay que hacer durable (semana 12, con Raft), pero el
+        mapa blockID -> DataNodes se reconstruye solo con los reports al
+        arrancar. Es lo que hace HDFS, y por eso el NameNode puede
+        reiniciarse sin saber donde estaba nada.
+        """
+        reportados = set(request.block_ids)
+        conocidos = 0
+        for block_id, meta in self.nn.block_map.items():
+            if block_id in reportados:
+                conocidos += 1
+                if request.node_id not in meta["datanodes"]:
+                    meta["datanodes"].append(request.node_id)
+            elif request.node_id in meta["datanodes"]:
+                # El nodo ya no lo tiene: dejo de contar como replica.
+                meta["datanodes"].remove(request.node_id)
+
+        huerfanos = [b for b in reportados if b not in self.nn.block_map]
+        print("[BlockReport] {}: {} bloques ({} conocidos, {} huerfanos)".format(
+            request.node_id, len(reportados), conocidos, len(huerfanos)))
+        # Los huerfanos son de archivos ya borrados: a la cola de borrado.
+        self.nn._agendar_borrado(huerfanos)
+        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+
+
+def vigilar(nn):
+    """Anuncia por consola cuando un DataNode pasa a muerto o revive.
+
+    No decide nada: vivos() ya filtra por last_seen cada vez que se
+    consulta. Esto es para verlo en la demo.
+    """
+    caidos = set()
+    while True:
+        time.sleep(INTERVALO_VIGILANCIA)
+        ahora = set(nn.muertos())
+        for nid in ahora - caidos:
+            print("[vigilancia] {} no responde hace mas de {} s".format(
+                nid, TIMEOUT_DATANODE))
+        for nid in caidos - ahora:
+            print("[vigilancia] {} volvio".format(nid))
+        caidos = ahora
 
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     nn = NameNodeService()
+    threading.Thread(target=vigilar, args=(nn,), daemon=True).start()
     dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(nn, server)
     dfsha_pb2_grpc.add_ControlServiceServicer_to_server(ControlService(nn), server)
     server.add_insecure_port("[::]:" + PORT)
