@@ -53,47 +53,60 @@ def generar(ruta, mb):
             f.write(bytes([i % 251]) + patron[1:])
 
 
-def levantar(carpeta_bloques):
+def levantar(base, cuantos_datanodes):
     servicio = nn_server.NameNodeService()
     servicio.auth = nn_server.build_auth()
 
-    nn = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    nn = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(servicio, nn)
     dfsha_pb2_grpc.add_ControlServiceServicer_to_server(
         nn_server.ControlService(servicio), nn)
     puerto_nn = nn.add_insecure_port("localhost:0")
     nn.start()
-
-    dnodo = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-    dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(
-        dn_server.DataNodeService(carpeta_bloques), dnodo)
-    puerto_dn = dnodo.add_insecure_port("localhost:0")
-    dnodo.start()
+    servidores = [nn]
 
     canal = grpc.insecure_channel("localhost:{}".format(puerto_nn))
-    # El DataNode se registra por heartbeat, como en la vida real.
-    dfsha_pb2_grpc.ControlServiceStub(canal).Heartbeat(
-        dfsha_pb2.HeartbeatRequest(
-            node_id="dn-1", addr="localhost:{}".format(puerto_dn),
-            free_bytes=shutil.disk_usage(carpeta_bloques).free,
-            num_blocks=0))
-    return servicio, dfsha_pb2_grpc.NameNodeServiceStub(canal), [nn, dnodo]
+    control = dfsha_pb2_grpc.ControlServiceStub(canal)
+    carpetas = []
+
+    for i in range(1, cuantos_datanodes + 1):
+        carpeta = os.path.join(base, "dn-{}".format(i))
+        os.makedirs(carpeta, exist_ok=True)
+        carpetas.append(carpeta)
+
+        dnodo = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+        dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(
+            dn_server.DataNodeService(carpeta), dnodo)
+        puerto_dn = dnodo.add_insecure_port("localhost:0")
+        dnodo.start()
+        servidores.append(dnodo)
+
+        # Se registra por heartbeat, como en la vida real.
+        control.Heartbeat(dfsha_pb2.HeartbeatRequest(
+            node_id="dn-{}".format(i),
+            addr="localhost:{}".format(puerto_dn),
+            free_bytes=shutil.disk_usage(carpeta).free, num_blocks=0))
+
+    return (servicio, dfsha_pb2_grpc.NameNodeServiceStub(canal),
+            servidores, carpetas)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mb", type=int, default=500)
+    ap.add_argument("--datanodes", type=int, default=1,
+                    help="cuantos DataNodes levantar (1 vs 4 para comparar)")
     ap.add_argument("--dir", default=None, help="donde dejar los temporales")
     args = ap.parse_args()
 
     base = args.dir or tempfile.mkdtemp(prefix="dfsha_hito1_")
-    bloques = os.path.join(base, "bloques")
-    os.makedirs(bloques, exist_ok=True)
+    os.makedirs(base, exist_ok=True)
     origen = os.path.join(base, "origen.bin")
     bajado = os.path.join(base, "bajado.bin")
 
-    print("BLOCK_SIZE = {} MB   archivo = {} MB   temporales en {}".format(
-        BLOCK_SIZE // MB, args.mb, base))
+    print("BLOCK_SIZE = {} MB   archivo = {} MB   DataNodes = {}".format(
+        BLOCK_SIZE // MB, args.mb, args.datanodes))
+    print("temporales en {}".format(base))
 
     print("\n[1/4] generando el archivo...")
     t = time.time()
@@ -102,7 +115,7 @@ def main():
     print("      {} bytes   sha256={}   ({:.1f} s)".format(
         os.path.getsize(origen), hash_original[:16], time.time() - t))
 
-    servicio, stub, servidores = levantar(bloques)
+    servicio, stub, servidores, carpetas = levantar(base, args.datanodes)
     token = stub.Login(dfsha_pb2.LoginRequest(
         user="drots", password="dfsha")).token
     cli.token = lambda: token
@@ -129,8 +142,10 @@ def main():
         print("      original: {}".format(hash_original))
         print("      bajado  : {}".format(hash_bajado))
         print("      tamano  : {} bytes".format(os.path.getsize(bajado)))
-        print("      bloques en el DataNode: {}".format(
-            len([f for f in os.listdir(bloques) if f.startswith("blk_")])))
+        reparto = {os.path.basename(c): len(
+            [f for f in os.listdir(c) if f.startswith("blk_")])
+            for c in carpetas}
+        print("      reparto de bloques: {}".format(reparto))
         print("\n{}".format("HITO 1 OK" if iguales else "FALLO: los hashes no coinciden"))
         return 0 if iguales else 1
     finally:

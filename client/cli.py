@@ -15,6 +15,7 @@ import sys
 import getpass
 import hashlib
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import grpc
 
@@ -25,6 +26,10 @@ from common.config import env, read_token, token_file      # noqa: E402
 from common.interfaces import CHUNK_SIZE                   # noqa: E402
 
 NAMENODE = env("NAMENODE_ADDR", "localhost:50051")
+
+# Cuantos bloques viajan a la vez. Con un DataNode da igual; con cuatro
+# es lo que multiplica el throughput.
+MAX_PARALELO = int(env("DFSHA_MAX_PARALELO", "4"))
 
 
 def token():
@@ -244,6 +249,42 @@ def bajar_bloque(ubicacion, ruta, offset):
         ubicacion.block_id, ultimo_error))
 
 
+def _offsets(bloques):
+    """Offset de cada bloque dentro del archivo.
+
+    Se acumulan los tamanos reales en vez de multiplicar el indice por
+    BLOCK_SIZE: asi el cliente no tiene que saber con que tamano de
+    bloque decidio partir el NameNode, y el ultimo bloque parcial no
+    puede descuadrar nada.
+    """
+    offsets = []
+    acumulado = 0
+    for b in bloques:
+        offsets.append(acumulado)
+        acumulado += b.size
+    return offsets
+
+
+def en_paralelo(tarea, bloques, offsets, que_hace):
+    """Corre tarea(bloque, offset) sobre todos los bloques a la vez.
+
+    Con un solo DataNode el paralelismo no compra nada. Con cuatro,
+    multiplica el throughput: es lo que sostiene RNF5.
+    """
+    resultados = {}
+    with ThreadPoolExecutor(max_workers=MAX_PARALELO) as pool:
+        futuros = {pool.submit(tarea, b, o): b
+                   for b, o in zip(bloques, offsets)}
+        hechos = 0
+        for fut in as_completed(futuros):
+            b = futuros[fut]
+            resultados[b.block_id] = fut.result()   # propaga la excepcion
+            hechos += 1
+            print("  {} {}/{}  bloque {}  {} bytes".format(
+                que_hace, hechos, len(bloques), b.index, b.size))
+    return resultados
+
+
 def cmd_put(stub, args):
     if not os.path.isfile(args.local):
         print("no existe el archivo {}".format(args.local))
@@ -253,19 +294,16 @@ def cmd_put(stub, args):
     asignacion = stub.Create(dfsha_pb2.CreateRequest(
         path=args.remoto, size=size, token=token()))
     bloques = sorted(asignacion.blocks, key=lambda b: b.index)
-    print("{} -> {}   {} bytes en {} bloques".format(
-        args.local, args.remoto, size, len(bloques)))
+    print("{} -> {}   {} bytes en {} bloques (hasta {} a la vez)".format(
+        args.local, args.remoto, size, len(bloques), MAX_PARALELO))
 
     try:
-        checksums = []
-        offset = 0
-        for b in bloques:
-            r = subir_bloque(b, args.local, offset)
-            checksums.append(dfsha_pb2.BlockChecksum(
-                block_id=b.block_id, sha256=r.sha256))
-            offset += b.size      # el offset sale de los tamanos reales,
-            print("  bloque {}/{}  {} bytes  ok".format(
-                b.index + 1, len(bloques), b.size))
+        respuestas = en_paralelo(
+            lambda b, o: subir_bloque(b, args.local, o),
+            bloques, _offsets(bloques), "subido")
+        checksums = [dfsha_pb2.BlockChecksum(
+            block_id=b.block_id, sha256=respuestas[b.block_id].sha256)
+            for b in bloques]
 
         stub.Complete(dfsha_pb2.CompleteRequest(
             path=args.remoto, lease_id=asignacion.lease_id,
@@ -290,17 +328,15 @@ def cmd_get(stub, args):
     print("{} -> {}   {} bytes en {} bloques".format(
         args.remoto, args.local, info.size, len(bloques)))
 
-    # Reservar el archivo completo de una vez permite escribir cada
-    # bloque en su offset sin depender del orden en que lleguen.
+    # Reservar el archivo completo de una vez permite que cada hilo
+    # escriba en su offset sin pisar a los demas: los bloques no se
+    # solapan, asi que no hace falta ningun lock. Cada hilo abre el
+    # archivo por su cuenta y hace su propio seek.
     with open(args.local, "wb") as f:
         f.truncate(info.size)
 
-    offset = 0
-    for b in bloques:
-        bajar_bloque(b, args.local, offset)
-        offset += b.size
-        print("  bloque {}/{}  {} bytes  ok".format(
-            b.index + 1, len(bloques), b.size))
+    en_paralelo(lambda b, o: bajar_bloque(b, args.local, o),
+                bloques, _offsets(bloques), "bajado")
     print("listo: {} ({} bytes)".format(args.local, os.path.getsize(args.local)))
 
 

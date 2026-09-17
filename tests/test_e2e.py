@@ -308,6 +308,71 @@ def test_open_de_un_directorio(sistema):
     assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
 
+# ---------------- varios DataNodes (semana 10) ----------------
+
+@pytest.mark.datanodes(4)
+def test_los_bloques_se_reparten_entre_datanodes(sistema, tmp_path):
+    """La definicion de listo de la semana 10.
+
+    Un archivo de 8 bloques con 4 DataNodes corriendo: los bloques
+    quedan repartidos, no todos en el mismo nodo.
+    """
+    origen = archivo(tmp_path, "o.bin", 8 * BLOQUE)
+    cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/repartido.bin"))
+
+    reparto = sistema.bloques_en_disco()
+    con_bloques = [n for n, b in reparto.items() if b]
+    total = sum(len(b) for b in reparto.values())
+    print("\nreparto de 8 bloques entre 4 DataNodes: {}".format(
+        {n: len(b) for n, b in reparto.items()}))
+    assert total == 8
+    assert len(con_bloques) >= 2      # repartidos, no todos en uno
+
+
+@pytest.mark.datanodes(4)
+def test_ida_y_vuelta_con_cuatro_datanodes(sistema, tmp_path):
+    origen = archivo(tmp_path, "o.bin", 5 * BLOQUE + 123)
+    esperado = sha(origen)
+    cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/f.bin"))
+    origen.unlink()
+
+    destino = tmp_path / "bajado.bin"
+    cli.cmd_get(sistema.stub, args(remoto="/f.bin", local=str(destino)))
+    assert sha(destino) == esperado
+
+
+@pytest.mark.datanodes(4)
+def test_un_datanode_muerto_desaparece_de_las_asignaciones(sistema):
+    import namenode.server as nn
+    sistema.servicio.datanodes["dn-2"]["last_seen"] -= nn.TIMEOUT_DATANODE + 1
+    vivos = sistema.servicio.vivos()
+    assert "dn-2" not in vivos and len(vivos) == 3
+
+    r = sistema.stub.Create(dfsha_pb2.CreateRequest(
+        path="/f.bin", size=10 * BLOQUE, token=sistema.token))
+    muerto = sistema.servicio.datanodes["dn-2"]["addr"]
+    for b in r.blocks:
+        assert muerto not in list(b.datanodes)
+
+
+@pytest.mark.datanodes(2)
+def test_open_falla_si_ningun_nodo_vivo_tiene_el_bloque(sistema, tmp_path):
+    import namenode.server as nn
+    origen = archivo(tmp_path, "o.bin", 100)
+    cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/f.bin"))
+
+    # Se cae el nodo que se quedo con el unico bloque.
+    block_id = sistema.servicio.ns.stat("/f.bin").blocks[0]
+    for node_id in sistema.servicio.block_map[block_id]["datanodes"]:
+        sistema.servicio.datanodes[node_id]["last_seen"] -= \
+            nn.TIMEOUT_DATANODE + 1
+
+    with pytest.raises(grpc.RpcError) as e:
+        sistema.stub.Open(dfsha_pb2.PathRequest(
+            path="/f.bin", token=sistema.token))
+    assert e.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
 def test_el_archivo_subido_aparece_en_ls_con_su_tamano(sistema, tmp_path):
     origen = archivo(tmp_path, "o.bin", 1234)
     sistema.stub.Mkdir(dfsha_pb2.PathRequest(path="/d", token=sistema.token))
