@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import shutil
+import hashlib
 import threading
 from concurrent import futures
 
@@ -20,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.pb import dfsha_pb2, dfsha_pb2_grpc   # noqa: E402
 from common.config import env, data_dir           # noqa: E402
+from common.interfaces import CHUNK_SIZE          # noqa: E402
 
 NODE_ID = env("NODE_ID", "dn-1")
 PORT = env("PORT", "50060")
@@ -28,25 +30,102 @@ NAMENODE = env("NAMENODE_ADDR", "localhost:50051")
 DATA_DIR = data_dir(NODE_ID)
 
 
+def ruta_bloque(block_id):
+    return os.path.join(DATA_DIR, "blk_" + block_id)
+
+
+def ruta_temporal(block_id):
+    # Los tmp_ no empiezan por blk_, asi que el heartbeat no los cuenta
+    # como bloques hasta que esten completos.
+    return os.path.join(DATA_DIR, "tmp_" + block_id)
+
+
 class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
 
-    # TODO semana 8: PutBlock
-    #   El primer mensaje del stream trae BlockHeader (block_id, size,
-    #   token). Los siguientes traen bytes. Vas acumulando a disco en
-    #   DATA_DIR/blk_<id>, calculas el sha256 y lo devuelves.
     def PutBlock(self, request_iterator, context):
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("PutBlock llega en la semana 8")
-        return dfsha_pb2.PutBlockResponse()
+        """Recibe un bloque por streaming y lo deja en disco.
 
-    # TODO semana 8: GetBlock
-    #   Lees el archivo en trozos de CHUNK_SIZE y haces yield de
-    #   BlockChunk(data=...). Es un generador.
+        El primer mensaje del stream trae el BlockHeader; los siguientes,
+        bytes. Nada se acumula en memoria: cada chunk se escribe apenas
+        llega y el sha256 se calcula de forma incremental.
+
+        Se escribe a tmp_<id> y se renombra con os.replace al terminar.
+        El renombrado es atomico en Windows y en Linux, asi que en disco
+        nunca hay un blk_<id> a medias: o esta completo, o no esta.
+        """
+        header = None
+        digest = hashlib.sha256()
+        recibidos = 0
+        f = None
+        temporal = None
+
+        try:
+            for chunk in request_iterator:
+                if chunk.HasField("header"):
+                    if header is not None:
+                        context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                                      "el header llego dos veces")
+                    header = chunk.header
+                    temporal = ruta_temporal(header.block_id)
+                    f = open(temporal, "wb")
+                    continue
+
+                if header is None:
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                                  "el primer mensaje debe ser el header")
+
+                datos = chunk.data
+                recibidos += len(datos)
+                if recibidos > header.size:
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "llegaron mas bytes de los anunciados ({} > {})".format(
+                            recibidos, header.size))
+                digest.update(datos)
+                f.write(datos)
+
+            if header is None:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                              "stream vacio, sin header")
+            if recibidos != header.size:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "se anunciaron {} bytes y llegaron {}".format(
+                        header.size, recibidos))
+
+            f.close()
+            f = None
+            os.replace(temporal, ruta_bloque(header.block_id))
+            sha = digest.hexdigest()
+            print("[PutBlock] {}  {} bytes  sha256={}".format(
+                header.block_id, recibidos, sha[:12]))
+            # TODO semana 11: reenviar a header.pipeline[0] si viene lleno
+            return dfsha_pb2.PutBlockResponse(ok=True, sha256=sha, message="ok")
+
+        finally:
+            if f is not None:
+                f.close()
+            # Si la subida se corto, no dejes basura ocupando disco.
+            if temporal and os.path.exists(temporal):
+                try:
+                    os.remove(temporal)
+                except OSError:
+                    pass
+
     def GetBlock(self, request, context):
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("GetBlock llega en la semana 8")
-        return
-        yield   # esto hace que Python trate la funcion como generador
+        """Devuelve el bloque en trozos de CHUNK_SIZE. Es un generador."""
+        ruta = ruta_bloque(request.block_id)
+        if not os.path.exists(ruta):
+            context.abort(grpc.StatusCode.NOT_FOUND,
+                          "este DataNode no tiene el bloque " + request.block_id)
+        print("[GetBlock] {}  {} bytes".format(
+            request.block_id, os.path.getsize(ruta)))
+        with open(ruta, "rb") as f:
+            while True:
+                datos = f.read(CHUNK_SIZE)
+                if not datos:
+                    return
+                yield dfsha_pb2.BlockChunk(data=datos)
 
     # TODO semana 11: el recolector de basura lo llama por comando piggyback.
     def DeleteBlock(self, request, context):
