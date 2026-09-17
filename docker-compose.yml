@@ -1,0 +1,53 @@
+# Paso intermedio entre "tres terminales" y AWS.
+# Necesita Docker Desktop con backend WSL2.
+#
+#   docker compose up --build
+#   docker compose run --rm cliente python client/cli.py ls /
+
+services:
+  namenode:
+    build: .
+    container_name: dfsha-namenode
+    command: python namenode/server.py
+    environment:
+      NODE_ID: nn-1
+      PORT: "50051"
+    ports:
+      - "50051:50051"
+
+  datanode-1:
+    build: .
+    command: python datanode/server.py
+    environment:
+      NODE_ID: dn-1
+      PORT: "50060"
+      ADVERTISE_ADDR: datanode-1:50060
+      NAMENODE_ADDR: namenode:50051
+      DATA_DIR: /data
+    volumes:
+      - dn1:/data
+    depends_on: [namenode]
+
+  datanode-2:
+    build: .
+    command: python datanode/server.py
+    environment:
+      NODE_ID: dn-2
+      PORT: "50060"
+      ADVERTISE_ADDR: datanode-2:50060
+      NAMENODE_ADDR: namenode:50051
+      DATA_DIR: /data
+    volumes:
+      - dn2:/data
+    depends_on: [namenode]
+
+  cliente:
+    build: .
+    environment:
+      NAMENODE_ADDR: namenode:50051
+    profiles: ["tools"]
+    depends_on: [namenode]
+
+volumes:
+  dn1:
+  dn2:

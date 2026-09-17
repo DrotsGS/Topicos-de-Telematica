@@ -1,0 +1,7 @@
+# Normaliza finales de linea. Sin esto, los .sh escritos en Windows
+# fallan dentro de los contenedores Linux y en EC2.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.zip binary
