@@ -11,6 +11,7 @@ Marca lo que vas cerrando. Lo que traigas nuevo cada semana se agrega aqui.
 - [x] NameNode responde Ping, Mkdir y Ls
 - [x] DataNode se registra por heartbeat
 - [ ] `docker compose up --build` levanta los tres contenedores
+      (pendiente: Docker no esta instalado en la maquina de desarrollo)
 - [ ] Borrador del documento de definicion del servicio
 
 ## Semana 7 - Namespace completo y especificacion
@@ -37,7 +38,7 @@ Marca lo que vas cerrando. Lo que traigas nuevo cada semana se agrega aqui.
 ## Semana 9 - Holgura
 
 - [ ] Primer despliegue en AWS Academy
-- [ ] deploy/setup.sh
+- [x] deploy/setup.sh
 - [ ] Adelantar mTLS y JWT (para aliviar la semana 12)
 - [ ] Integrar ideas nuevas
 

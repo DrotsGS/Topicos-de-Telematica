@@ -1,2 +1,9 @@
-grpcio
-grpcio-tools
+# Fijadas para que el contenedor (Python 3.12) y el venv local (3.14)
+# usen exactamente las mismas bibliotecas. La diferencia de version de
+# Python no importa mientras estas coincidan.
+grpcio==1.83.1
+grpcio-tools==1.83.1
+protobuf==7.36.1
+
+# Solo para las pruebas; no la necesita el runtime de los nodos.
+pytest==9.1.1

@@ -48,6 +48,12 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
         return
         yield   # esto hace que Python trate la funcion como generador
 
+    # TODO semana 11: el recolector de basura lo llama por comando piggyback.
+    def DeleteBlock(self, request, context):
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("DeleteBlock llega en la semana 11")
+        return dfsha_pb2.StatusResponse()
+
     # TODO semana 11: ReplicateTo, para el pipeline DataNode -> DataNode
 
 

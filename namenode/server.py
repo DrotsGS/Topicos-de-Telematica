@@ -56,6 +56,9 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         return dfsha_pb2.StatusResponse(ok=ok, message=msg)
 
     def Ls(self, request, context):
+        if self._check(request.token, context) is None:
+            return dfsha_pb2.LsResponse()
+
         entries = self.ns.ls(request.path)
         if entries is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
