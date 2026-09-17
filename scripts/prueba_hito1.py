@@ -22,7 +22,7 @@ import grpc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc     # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
 from common.interfaces import BLOCK_SIZE            # noqa: E402
 from namenode import server as nn_server            # noqa: E402
 from datanode import server as dn_server            # noqa: E402
@@ -57,16 +57,16 @@ def levantar(base, cuantos_datanodes):
     servicio = nn_server.NameNodeService()
     servicio.auth = nn_server.build_auth()
 
-    nn = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
-    dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(servicio, nn)
-    dfsha_pb2_grpc.add_ControlServiceServicer_to_server(
-        nn_server.ControlService(servicio), nn)
-    puerto_nn = nn.add_insecure_port("localhost:0")
-    nn.start()
-    servidores = [nn]
+    servidor_nn = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+    nn_grpc.add_NameNodeServiceServicer_to_server(servicio, servidor_nn)
+    ctl_grpc.add_ControlServiceServicer_to_server(
+        nn_server.ControlService(servicio), servidor_nn)
+    puerto_nn = servidor_nn.add_insecure_port("localhost:0")
+    servidor_nn.start()
+    servidores = [servidor_nn]
 
     canal = grpc.insecure_channel("localhost:{}".format(puerto_nn))
-    control = dfsha_pb2_grpc.ControlServiceStub(canal)
+    control = ctl_grpc.ControlServiceStub(canal)
     carpetas = []
 
     for i in range(1, cuantos_datanodes + 1):
@@ -75,19 +75,19 @@ def levantar(base, cuantos_datanodes):
         carpetas.append(carpeta)
 
         dnodo = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-        dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(
+        dn_grpc.add_DataNodeServiceServicer_to_server(
             dn_server.DataNodeService(carpeta), dnodo)
         puerto_dn = dnodo.add_insecure_port("localhost:0")
         dnodo.start()
         servidores.append(dnodo)
 
         # Se registra por heartbeat, como en la vida real.
-        control.Heartbeat(dfsha_pb2.HeartbeatRequest(
+        control.Heartbeat(ctl.HeartbeatRequest(
             node_id="dn-{}".format(i),
             addr="localhost:{}".format(puerto_dn),
             free_bytes=shutil.disk_usage(carpeta).free, num_blocks=0))
 
-    return (servicio, dfsha_pb2_grpc.NameNodeServiceStub(canal),
+    return (servicio, nn_grpc.NameNodeServiceStub(canal),
             servidores, carpetas)
 
 
@@ -116,7 +116,7 @@ def main():
         os.path.getsize(origen), hash_original[:16], time.time() - t))
 
     servicio, stub, servidores, carpetas = levantar(base, args.datanodes)
-    token = stub.Login(dfsha_pb2.LoginRequest(
+    token = stub.Login(nn.LoginRequest(
         user="drots", password="dfsha")).token
     cli.token = lambda: token
 

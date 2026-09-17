@@ -14,8 +14,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc   # noqa: E402
-from datanode import server as dn                  # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
+from datanode import server as dn_server        # noqa: E402
 
 CHUNK = 64 * 1024
 
@@ -24,13 +24,13 @@ CHUNK = 64 * 1024
 def datanodo(tmp_path):
     """Un DataNode de verdad, con sus bloques en un directorio temporal."""
     servidor = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(
-        dn.DataNodeService(str(tmp_path)), servidor)
+    dn_grpc.add_DataNodeServiceServicer_to_server(
+        dn_server.DataNodeService(str(tmp_path)), servidor)
     puerto = servidor.add_insecure_port("localhost:0")
     servidor.start()
 
     canal = grpc.insecure_channel("localhost:{}".format(puerto))
-    yield dfsha_pb2_grpc.DataNodeServiceStub(canal), tmp_path
+    yield dn_grpc.DataNodeServiceStub(canal), tmp_path
 
     canal.close()
     servidor.stop(None)
@@ -41,17 +41,17 @@ def subir(stub, block_id, datos, anunciar=None):
     size = len(datos) if anunciar is None else anunciar
 
     def stream():
-        yield dfsha_pb2.BlockChunk(header=dfsha_pb2.BlockHeader(
+        yield dn.BlockChunk(header=dn.BlockHeader(
             block_id=block_id, size=size))
         for i in range(0, len(datos), CHUNK):
-            yield dfsha_pb2.BlockChunk(data=datos[i:i + CHUNK])
+            yield dn.BlockChunk(data=datos[i:i + CHUNK])
 
     return stub.PutBlock(stream())
 
 
 def bajar(stub, block_id):
     return b"".join(c.data for c in stub.GetBlock(
-        dfsha_pb2.GetBlockRequest(block_id=block_id)))
+        dn.GetBlockRequest(block_id=block_id)))
 
 
 def test_ida_y_vuelta(datanodo):
@@ -103,7 +103,7 @@ def test_stream_sin_header(datanodo):
     stub, _ = datanodo
 
     def stream():
-        yield dfsha_pb2.BlockChunk(data=b"sin header")
+        yield dn.BlockChunk(data=b"sin header")
 
     with pytest.raises(grpc.RpcError) as e:
         stub.PutBlock(stream())
@@ -121,5 +121,5 @@ def test_delete_block_sigue_sin_implementarse(datanodo):
     """Hasta la semana 11 el recolector no existe: que se note."""
     stub, _ = datanodo
     with pytest.raises(grpc.RpcError) as e:
-        stub.DeleteBlock(dfsha_pb2.BlockRef(block_id="b1"))
+        stub.DeleteBlock(dn.BlockRef(block_id="b1"))
     assert e.value.code() == grpc.StatusCode.UNIMPLEMENTED

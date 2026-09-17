@@ -19,7 +19,7 @@ import grpc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc          # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
 from common.config import env                            # noqa: E402
 from common.interfaces import (                            # noqa: E402
     build_auth, ConsistentHashPlacer, BLOCK_SIZE, REPLICATION_FACTOR)
@@ -64,7 +64,7 @@ CODIGOS = {
 }
 
 
-class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
+class NameNodeService(nn_grpc.NameNodeServiceServicer):
     def __init__(self):
         self.ns = Namespace()
         self.auth = build_auth()
@@ -137,7 +137,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
     # ---------------- RF1: namespace ----------------
 
     def Ping(self, request, context):
-        return dfsha_pb2.PingResponse(
+        return nn.PingResponse(
             node_id=NODE_ID, is_leader=True, leader_addr="")
 
     def Login(self, request, context):
@@ -148,7 +148,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
                           "usuario o contrasena incorrectos")
         print("[Login] {} -> ok".format(request.user))
         vence = getattr(self.auth, "ttl", 0)
-        return dfsha_pb2.LoginResponse(
+        return nn.LoginResponse(
             token=token, expires_at=int(time.time()) + vence)
 
     def Mkdir(self, request, context):
@@ -157,7 +157,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         print("[Mkdir] {} -> {}".format(request.path, msg))
         if not ok:
             self._fallar(context, msg)
-        return dfsha_pb2.StatusResponse(ok=True, message=msg)
+        return comun.StatusResponse(ok=True, message=msg)
 
     def Ls(self, request, context):
         self._autorizar(request.token, context)
@@ -166,8 +166,8 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
             context.abort(grpc.StatusCode.NOT_FOUND,
                           "no existe o no es un directorio")
         print("[Ls] {} -> {} entradas".format(request.path, len(entries)))
-        return dfsha_pb2.LsResponse(entries=[
-            dfsha_pb2.Entry(name=e.name, is_dir=e.is_dir, size=e.size)
+        return nn.LsResponse(entries=[
+            comun.Entry(name=e.name, is_dir=e.is_dir, size=e.size)
             for e in entries
         ])
 
@@ -176,7 +176,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         nodo = self.ns.stat(request.path)
         if nodo is None:
             context.abort(grpc.StatusCode.NOT_FOUND, "no existe")
-        return dfsha_pb2.FileInfo(
+        return nn.FileInfo(
             path=request.path,
             is_dir=nodo.is_dir,
             size=nodo.size,
@@ -194,7 +194,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
             self._fallar(context, msg)
         self._agendar_borrado(huerfanos)
         self._purgar_leases()
-        return dfsha_pb2.StatusResponse(ok=True, message=msg)
+        return comun.StatusResponse(ok=True, message=msg)
 
     def Rm(self, request, context):
         self._autorizar(request.token, context)
@@ -204,7 +204,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
             self._fallar(context, msg)
         self._agendar_borrado(huerfanos)
         self._purgar_leases()
-        return dfsha_pb2.StatusResponse(ok=True, message=msg)
+        return comun.StatusResponse(ok=True, message=msg)
 
     # ---------------- RF2: escritura (WORM) ----------------
 
@@ -242,7 +242,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
             self.block_map[block_id] = {
                 "index": indice, "size": tam,
                 "datanodes": destinos, "sha256": ""}
-            asignaciones.append(dfsha_pb2.BlockAssignment(
+            asignaciones.append(nn.BlockAssignment(
                 block_id=block_id, index=indice, size=tam,
                 datanodes=[self.datanodes[n]["addr"] for n in destinos],
                 access_token=""))     # TODO semana 12: firmado por el NameNode
@@ -261,7 +261,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
         self.leases[lease_id] = request.path
         print("[Create] {}  {} bytes  {} bloques  lease={}".format(
             request.path, request.size, len(asignaciones), lease_id[:8]))
-        return dfsha_pb2.CreateResponse(
+        return nn.CreateResponse(
             lease_id=lease_id, blocks=asignaciones)
 
     def Complete(self, request, context):
@@ -292,7 +292,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
                 self.block_map[c.block_id]["sha256"] = c.sha256
         self.leases.pop(request.lease_id, None)
         print("[Complete] {} -> COMMITTED".format(request.path))
-        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+        return comun.StatusResponse(ok=True, message="ok")
 
     def Abort(self, request, context):
         self._autorizar(request.token, context)
@@ -306,7 +306,7 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
             self._fallar(context, msg)
         self._agendar_borrado(huerfanos)
         print("[Abort] {} cancelado".format(path))
-        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+        return comun.StatusResponse(ok=True, message="ok")
 
     # ---------------- RF2: lectura ----------------
 
@@ -338,17 +338,17 @@ class NameNodeService(dfsha_pb2_grpc.NameNodeServiceServicer):
                 context.abort(
                     grpc.StatusCode.UNAVAILABLE,
                     "ningun DataNode vivo tiene el bloque " + block_id)
-            ubicaciones.append(dfsha_pb2.BlockLocation(
+            ubicaciones.append(nn.BlockLocation(
                 block_id=block_id, index=meta["index"], size=meta["size"],
                 datanodes=direcciones, sha256=meta["sha256"],
                 access_token=""))
 
         ubicaciones.sort(key=lambda b: b.index)
         print("[Open] {}  {} bloques".format(request.path, len(ubicaciones)))
-        return dfsha_pb2.OpenResponse(size=nodo.size, blocks=ubicaciones)
+        return nn.OpenResponse(size=nodo.size, blocks=ubicaciones)
 
 
-class ControlService(dfsha_pb2_grpc.ControlServiceServicer):
+class ControlService(ctl_grpc.ControlServiceServicer):
     """El DataNode siempre inicia la conexion. El NameNode nunca al reves."""
 
     def __init__(self, nn):
@@ -368,7 +368,7 @@ class ControlService(dfsha_pb2_grpc.ControlServiceServicer):
         elif anterior.get("last_seen", 0) <= time.time() - TIMEOUT_DATANODE:
             print("[Heartbeat] {} revivio".format(request.node_id))
         # TODO semana 11: aqui van los comandos piggyback (replicar, borrar)
-        return dfsha_pb2.HeartbeatResponse()
+        return ctl.HeartbeatResponse()
 
     def BlockReceived(self, request, context):
         """El DataNode avisa que ya tiene un bloque.
@@ -381,12 +381,12 @@ class ControlService(dfsha_pb2_grpc.ControlServiceServicer):
         if meta is None:
             print("[BlockReceived] {} reporto un bloque desconocido: {}".format(
                 request.node_id, request.block_id))
-            return dfsha_pb2.StatusResponse(ok=True, message="bloque sin dueno")
+            return comun.StatusResponse(ok=True, message="bloque sin dueno")
         if request.node_id not in meta["datanodes"]:
             meta["datanodes"].append(request.node_id)
         if request.sha256 and not meta["sha256"]:
             meta["sha256"] = request.sha256
-        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+        return comun.StatusResponse(ok=True, message="ok")
 
     def BlockReport(self, request, context):
         """La lista completa de bloques de un DataNode.
@@ -413,10 +413,10 @@ class ControlService(dfsha_pb2_grpc.ControlServiceServicer):
             request.node_id, len(reportados), conocidos, len(huerfanos)))
         # Los huerfanos son de archivos ya borrados: a la cola de borrado.
         self.nn._agendar_borrado(huerfanos)
-        return dfsha_pb2.StatusResponse(ok=True, message="ok")
+        return comun.StatusResponse(ok=True, message="ok")
 
 
-def vigilar(nn):
+def vigilar(servicio):
     """Anuncia por consola cuando un DataNode pasa a muerto o revive.
 
     No decide nada: vivos() ya filtra por last_seen cada vez que se
@@ -425,7 +425,7 @@ def vigilar(nn):
     caidos = set()
     while True:
         time.sleep(INTERVALO_VIGILANCIA)
-        ahora = set(nn.muertos())
+        ahora = set(servicio.muertos())
         for nid in ahora - caidos:
             print("[vigilancia] {} no responde hace mas de {} s".format(
                 nid, TIMEOUT_DATANODE))
@@ -436,10 +436,11 @@ def vigilar(nn):
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    nn = NameNodeService()
-    threading.Thread(target=vigilar, args=(nn,), daemon=True).start()
-    dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(nn, server)
-    dfsha_pb2_grpc.add_ControlServiceServicer_to_server(ControlService(nn), server)
+    servicio = NameNodeService()
+    threading.Thread(target=vigilar, args=(servicio,), daemon=True).start()
+    nn_grpc.add_NameNodeServiceServicer_to_server(servicio, server)
+    ctl_grpc.add_ControlServiceServicer_to_server(
+        ControlService(servicio), server)
     server.add_insecure_port("[::]:" + PORT)
     server.start()
     print("NameNode {} escuchando en el puerto {}".format(NODE_ID, PORT))

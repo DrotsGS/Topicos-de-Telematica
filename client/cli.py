@@ -21,7 +21,7 @@ import grpc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc            # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
 from common.config import env, read_token, token_file      # noqa: E402
 from common.interfaces import CHUNK_SIZE                   # noqa: E402
 
@@ -74,13 +74,13 @@ def build_parser():
 
 
 def cmd_ping(stub, args):
-    r = stub.Ping(dfsha_pb2.Empty())
+    r = stub.Ping(comun.Empty())
     print("{}   lider={}".format(r.node_id, r.is_leader))
 
 
 def cmd_login(stub, args):
     password = args.password or getpass.getpass("contrasena: ")
-    r = stub.Login(dfsha_pb2.LoginRequest(
+    r = stub.Login(nn.LoginRequest(
         user=args.usuario, password=password))
     destino = token_file()
     with open(destino, "w", encoding="utf-8") as f:
@@ -93,12 +93,12 @@ def cmd_login(stub, args):
 
 
 def cmd_mkdir(stub, args):
-    r = stub.Mkdir(dfsha_pb2.PathRequest(path=args.path, token=token()))
+    r = stub.Mkdir(nn.PathRequest(path=args.path, token=token()))
     print(r.message)
 
 
 def cmd_ls(stub, args):
-    r = stub.Ls(dfsha_pb2.PathRequest(path=args.path, token=token()))
+    r = stub.Ls(nn.PathRequest(path=args.path, token=token()))
     if not r.entries:
         print("(vacio)")
         return
@@ -108,19 +108,19 @@ def cmd_ls(stub, args):
 
 
 def cmd_rmdir(stub, args):
-    r = stub.Rmdir(dfsha_pb2.PathRequest(path=args.path, token=token()))
+    r = stub.Rmdir(nn.PathRequest(path=args.path, token=token()))
     print(r.message)
 
 
 def cmd_rm(stub, args):
-    r = stub.Rm(dfsha_pb2.PathRequest(path=args.path, token=token()))
+    r = stub.Rm(nn.PathRequest(path=args.path, token=token()))
     print(r.message)
 
 
 def cmd_stat(stub, args):
-    r = stub.Stat(dfsha_pb2.PathRequest(path=args.path, token=token()))
+    r = stub.Stat(nn.PathRequest(path=args.path, token=token()))
     tipo = "directorio" if r.is_dir else "archivo"
-    estado = "COMMITTED" if r.state == dfsha_pb2.COMMITTED \
+    estado = "COMMITTED" if r.state == comun.COMMITTED \
         else "UNDER_CONSTRUCTION"
     print("ruta    : {}".format(r.path))
     print("tipo    : {}".format(tipo))
@@ -162,11 +162,11 @@ def _put_a_un_datanode(direccion, asignacion, ruta, offset):
     """Sube un bloque a UN DataNode y verifica el sha256 que devuelve."""
     canal = _canal_datanode(direccion)
     try:
-        stub = dfsha_pb2_grpc.DataNodeServiceStub(canal)
+        stub = dn_grpc.DataNodeServiceStub(canal)
         digest = hashlib.sha256()
 
         def stream():
-            yield dfsha_pb2.BlockChunk(header=dfsha_pb2.BlockHeader(
+            yield dn.BlockChunk(header=dn.BlockHeader(
                 block_id=asignacion.block_id,
                 size=asignacion.size,
                 access_token=asignacion.access_token))
@@ -177,7 +177,7 @@ def _put_a_un_datanode(direccion, asignacion, ruta, offset):
             # verifica el DataNode).
             for datos in _leer_tramo(ruta, offset, asignacion.size):
                 digest.update(datos)
-                yield dfsha_pb2.BlockChunk(data=datos)
+                yield dn.BlockChunk(data=datos)
 
         respuesta = stub.PutBlock(stream())
         mio = digest.hexdigest()
@@ -221,12 +221,12 @@ def bajar_bloque(ubicacion, ruta, offset):
     for origen in ubicacion.datanodes:
         canal = _canal_datanode(origen)
         try:
-            stub = dfsha_pb2_grpc.DataNodeServiceStub(canal)
+            stub = dn_grpc.DataNodeServiceStub(canal)
             digest = hashlib.sha256()
             escritos = 0
             with open(ruta, "r+b") as f:
                 f.seek(offset)
-                for chunk in stub.GetBlock(dfsha_pb2.GetBlockRequest(
+                for chunk in stub.GetBlock(dn.GetBlockRequest(
                         block_id=ubicacion.block_id,
                         access_token=ubicacion.access_token)):
                     # TODO semana 9: cipher.decrypt(chunk.data)
@@ -291,7 +291,7 @@ def cmd_put(stub, args):
         sys.exit(1)
     size = os.path.getsize(args.local)
 
-    asignacion = stub.Create(dfsha_pb2.CreateRequest(
+    asignacion = stub.Create(nn.CreateRequest(
         path=args.remoto, size=size, token=token()))
     bloques = sorted(asignacion.blocks, key=lambda b: b.index)
     print("{} -> {}   {} bytes en {} bloques (hasta {} a la vez)".format(
@@ -301,11 +301,11 @@ def cmd_put(stub, args):
         respuestas = en_paralelo(
             lambda b, o: subir_bloque(b, args.local, o),
             bloques, _offsets(bloques), "subido")
-        checksums = [dfsha_pb2.BlockChecksum(
+        checksums = [nn.BlockChecksum(
             block_id=b.block_id, sha256=respuestas[b.block_id].sha256)
             for b in bloques]
 
-        stub.Complete(dfsha_pb2.CompleteRequest(
+        stub.Complete(nn.CompleteRequest(
             path=args.remoto, lease_id=asignacion.lease_id,
             checksums=checksums))
         print("listo: {} quedo COMMITTED".format(args.remoto))
@@ -314,7 +314,7 @@ def cmd_put(stub, args):
         # bloqueado con un archivo invisible a medio subir.
         print("fallo la subida: {}".format(err))
         try:
-            stub.Abort(dfsha_pb2.LeaseRequest(
+            stub.Abort(nn.LeaseRequest(
                 lease_id=asignacion.lease_id, token=token()))
             print("subida cancelada, el path quedo libre")
         except grpc.RpcError as err2:
@@ -323,7 +323,7 @@ def cmd_put(stub, args):
 
 
 def cmd_get(stub, args):
-    info = stub.Open(dfsha_pb2.PathRequest(path=args.remoto, token=token()))
+    info = stub.Open(nn.PathRequest(path=args.remoto, token=token()))
     bloques = sorted(info.blocks, key=lambda b: b.index)
     print("{} -> {}   {} bytes en {} bloques".format(
         args.remoto, args.local, info.size, len(bloques)))
@@ -356,7 +356,7 @@ HANDLERS = {
 def main():
     args = build_parser().parse_args()
     channel = grpc.insecure_channel(NAMENODE)
-    stub = dfsha_pb2_grpc.NameNodeServiceStub(channel)
+    stub = nn_grpc.NameNodeServiceStub(channel)
     try:
         HANDLERS[args.cmd](stub, args)
     except grpc.RpcError as err:

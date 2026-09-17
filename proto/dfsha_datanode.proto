@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package dfsha;
+
+import "dfsha_common.proto";
+
+// =====================================================================
+//  2. Cliente <-> DataNode   (plano de datos)
+//
+//  Aqui van los bytes, y el NameNode no participa. Es lo que evita que
+//  se vuelva cuello de botella: el metadato pesa bytes, el archivo
+//  pesa gigas, y cada uno viaja por su lado.
+// =====================================================================
+service DataNodeService {
+  rpc PutBlock    (stream BlockChunk)  returns (PutBlockResponse);
+  rpc GetBlock    (GetBlockRequest)    returns (stream BlockChunk);
+  rpc DeleteBlock (BlockRef)           returns (dfsha.StatusResponse);
+
+  // Usado tambien por el pipeline DataNode <-> DataNode (semana 11)
+  rpc ReplicateTo (ReplicateRequest)   returns (dfsha.StatusResponse);
+}
+
+
+message BlockHeader {
+  string   block_id     = 1;
+  uint64   size         = 2;
+  string   access_token = 3;
+  repeated string pipeline = 4;   // siguientes replicas, semana 11
+}
+
+// El primer mensaje del stream lleva header; los siguientes, data.
+message BlockChunk {
+  oneof payload {
+    BlockHeader header = 1;
+    bytes       data   = 2;
+  }
+}
+
+message PutBlockResponse {
+  bool   ok      = 1;
+  string sha256  = 2;
+  string message = 3;
+}
+
+message GetBlockRequest {
+  string block_id     = 1;
+  string access_token = 2;
+}
+
+message BlockRef {
+  string block_id = 1;
+}
+
+message ReplicateRequest {
+  string   block_id = 1;
+  repeated string targets = 2;
+}

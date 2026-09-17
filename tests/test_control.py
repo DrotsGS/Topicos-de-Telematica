@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc     # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
 from common.interfaces import FileAuth              # noqa: E402
 from namenode import server as nn_server            # noqa: E402
 
@@ -26,22 +26,22 @@ def control():
     servicio.auth = FileAuth(USUARIOS, "secreto-de-prueba")
 
     servidor = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(servicio, servidor)
-    dfsha_pb2_grpc.add_ControlServiceServicer_to_server(
+    nn_grpc.add_NameNodeServiceServicer_to_server(servicio, servidor)
+    ctl_grpc.add_ControlServiceServicer_to_server(
         nn_server.ControlService(servicio), servidor)
     puerto = servidor.add_insecure_port("localhost:0")
     servidor.start()
 
     canal = grpc.insecure_channel("localhost:{}".format(puerto))
-    yield (dfsha_pb2_grpc.ControlServiceStub(canal),
-           dfsha_pb2_grpc.NameNodeServiceStub(canal),
+    yield (ctl_grpc.ControlServiceStub(canal),
+           nn_grpc.NameNodeServiceStub(canal),
            servicio)
     canal.close()
     servidor.stop(None)
 
 
 def latir(stub, node_id, direccion=None):
-    return stub.Heartbeat(dfsha_pb2.HeartbeatRequest(
+    return stub.Heartbeat(ctl.HeartbeatRequest(
         node_id=node_id, addr=direccion or (node_id + ":50060"),
         free_bytes=10 ** 9, num_blocks=0))
 
@@ -77,14 +77,14 @@ def test_un_nodo_muerto_revive_al_volver_a_latir(control):
 
 def test_create_no_asigna_bloques_a_un_nodo_muerto(control):
     """El cambio de una linea con consecuencias grandes."""
-    ctrl, nn, servicio = control
+    ctrl, nodo, servicio = control
     latir(ctrl, "dn-1")
     latir(ctrl, "dn-2")
     servicio.datanodes["dn-1"]["last_seen"] -= nn_server.TIMEOUT_DATANODE + 1
 
-    token = nn.Login(dfsha_pb2.LoginRequest(
+    token = nodo.Login(nn.LoginRequest(
         user="drots", password="dfsha")).token
-    r = nn.Create(dfsha_pb2.CreateRequest(
+    r = nodo.Create(nn.CreateRequest(
         path="/f.bin", size=1000, token=token))
     for b in r.blocks:
         assert list(b.datanodes) == ["dn-2:50060"]
@@ -104,7 +104,7 @@ def test_block_received_agrega_la_replica(control):
     ctrl, _, servicio = control
     servicio.block_map["b1"] = {
         "index": 0, "size": 10, "datanodes": [], "sha256": ""}
-    ctrl.BlockReceived(dfsha_pb2.BlockReceivedRequest(
+    ctrl.BlockReceived(ctl.BlockReceivedRequest(
         node_id="dn-1", block_id="b1", sha256="abc"))
     assert servicio.block_map["b1"]["datanodes"] == ["dn-1"]
     assert servicio.block_map["b1"]["sha256"] == "abc"
@@ -114,14 +114,14 @@ def test_block_received_no_duplica(control):
     ctrl, _, servicio = control
     servicio.block_map["b1"] = {
         "index": 0, "size": 10, "datanodes": ["dn-1"], "sha256": ""}
-    ctrl.BlockReceived(dfsha_pb2.BlockReceivedRequest(
+    ctrl.BlockReceived(ctl.BlockReceivedRequest(
         node_id="dn-1", block_id="b1", sha256=""))
     assert servicio.block_map["b1"]["datanodes"] == ["dn-1"]
 
 
 def test_block_received_de_un_bloque_desconocido_no_revienta(control):
     ctrl, _, _ = control
-    r = ctrl.BlockReceived(dfsha_pb2.BlockReceivedRequest(
+    r = ctrl.BlockReceived(ctl.BlockReceivedRequest(
         node_id="dn-1", block_id="fantasma", sha256=""))
     assert r.ok
 
@@ -135,7 +135,7 @@ def test_block_report_reconstruye_las_ubicaciones(control):
         servicio.block_map[bid] = {
             "index": 0, "size": 10, "datanodes": [], "sha256": ""}
 
-    ctrl.BlockReport(dfsha_pb2.BlockReportRequest(
+    ctrl.BlockReport(ctl.BlockReportRequest(
         node_id="dn-1", block_ids=["b1", "b2"]))
     assert servicio.block_map["b1"]["datanodes"] == ["dn-1"]
     assert servicio.block_map["b2"]["datanodes"] == ["dn-1"]
@@ -145,7 +145,7 @@ def test_block_report_quita_lo_que_el_nodo_ya_no_tiene(control):
     ctrl, _, servicio = control
     servicio.block_map["b1"] = {
         "index": 0, "size": 10, "datanodes": ["dn-1", "dn-2"], "sha256": ""}
-    ctrl.BlockReport(dfsha_pb2.BlockReportRequest(
+    ctrl.BlockReport(ctl.BlockReportRequest(
         node_id="dn-1", block_ids=[]))       # dn-1 perdio su disco
     assert servicio.block_map["b1"]["datanodes"] == ["dn-2"]
 
@@ -153,6 +153,6 @@ def test_block_report_quita_lo_que_el_nodo_ya_no_tiene(control):
 def test_block_report_agenda_los_bloques_sin_dueno(control):
     """Bloques de archivos ya borrados: a la cola del recolector."""
     ctrl, _, servicio = control
-    ctrl.BlockReport(dfsha_pb2.BlockReportRequest(
+    ctrl.BlockReport(ctl.BlockReportRequest(
         node_id="dn-1", block_ids=["viejo1", "viejo2"]))
     assert sorted(servicio.pendientes_borrado) == ["viejo1", "viejo2"]

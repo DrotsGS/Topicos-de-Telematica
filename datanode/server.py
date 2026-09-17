@@ -19,7 +19,7 @@ import grpc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc   # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
 from common.config import env, data_dir           # noqa: E402
 from common.interfaces import CHUNK_SIZE          # noqa: E402
 
@@ -30,7 +30,7 @@ NAMENODE = env("NAMENODE_ADDR", "localhost:50051")
 DATA_DIR = data_dir(NODE_ID)
 
 
-class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
+class DataNodeService(dn_grpc.DataNodeServiceServicer):
     """El almacen de bloques.
 
     La carpeta se recibe por parametro y no se lee del entorno aqui
@@ -120,7 +120,7 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
                 # es quien lo escribio.
                 self.avisar(header.block_id, sha)
             # TODO semana 11: reenviar a header.pipeline[0] si viene lleno
-            return dfsha_pb2.PutBlockResponse(ok=True, sha256=sha, message="ok")
+            return dn.PutBlockResponse(ok=True, sha256=sha, message="ok")
 
         finally:
             if f is not None:
@@ -145,13 +145,13 @@ class DataNodeService(dfsha_pb2_grpc.DataNodeServiceServicer):
                 datos = f.read(CHUNK_SIZE)
                 if not datos:
                     return
-                yield dfsha_pb2.BlockChunk(data=datos)
+                yield dn.BlockChunk(data=datos)
 
     # TODO semana 11: el recolector de basura lo llama por comando piggyback.
     def DeleteBlock(self, request, context):
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("DeleteBlock llega en la semana 11")
-        return dfsha_pb2.StatusResponse()
+        return comun.StatusResponse()
 
     # TODO semana 11: ReplicateTo, para el pipeline DataNode -> DataNode
 
@@ -161,7 +161,7 @@ INTERVALO_BLOCK_REPORT = 60
 
 
 def control_stub():
-    return dfsha_pb2_grpc.ControlServiceStub(grpc.insecure_channel(NAMENODE))
+    return ctl_grpc.ControlServiceStub(grpc.insecure_channel(NAMENODE))
 
 
 def heartbeat_loop(servicio):
@@ -175,7 +175,7 @@ def heartbeat_loop(servicio):
     while True:
         try:
             free = shutil.disk_usage(servicio.carpeta).free
-            resp = stub.Heartbeat(dfsha_pb2.HeartbeatRequest(
+            resp = stub.Heartbeat(ctl.HeartbeatRequest(
                 node_id=NODE_ID, addr=ADDR, free_bytes=free,
                 num_blocks=len(servicio.bloques())))
             for cmd in resp.commands:
@@ -195,7 +195,7 @@ def block_report_loop(servicio):
     while True:
         try:
             ids = servicio.bloques()
-            stub.BlockReport(dfsha_pb2.BlockReportRequest(
+            stub.BlockReport(ctl.BlockReportRequest(
                 node_id=NODE_ID, block_ids=ids))
             print("[BlockReport] se reportaron {} bloques".format(len(ids)))
         except grpc.RpcError as e:
@@ -205,7 +205,7 @@ def block_report_loop(servicio):
 
 def avisar_bloque_recibido(block_id, sha):
     try:
-        control_stub().BlockReceived(dfsha_pb2.BlockReceivedRequest(
+        control_stub().BlockReceived(ctl.BlockReceivedRequest(
             node_id=NODE_ID, block_id=block_id, sha256=sha))
     except grpc.RpcError as e:
         # Que falle el aviso no invalida el bloque: el proximo
@@ -222,7 +222,7 @@ def serve():
                      daemon=True).start()
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(servicio, server)
+    dn_grpc.add_DataNodeServiceServicer_to_server(servicio, server)
     server.add_insecure_port("[::]:" + PORT)
     server.start()
     print("DataNode {} escuchando en el puerto {}".format(NODE_ID, PORT))

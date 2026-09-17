@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package dfsha;
+
+// =====================================================================
+//  Tipos compartidos por los tres servicios.
+//
+//  Semana 10: el .proto unico de la semana 6 se separo en cuatro
+//  archivos, uno por par de comunicacion mas este de tipos comunes.
+//  Es refactor puro: ni un mensaje cambio de forma.
+// =====================================================================
+
+message Empty {}
+
+message StatusResponse {
+  bool   ok      = 1;
+  string message = 2;
+}
+
+// Un archivo o no existe, o existe completo. No hay estado intermedio
+// visible: eso es el WORM.
+enum FileState {
+  UNDER_CONSTRUCTION = 0;
+  COMMITTED          = 1;
+}
+
+message Entry {
+  string name   = 1;
+  bool   is_dir = 2;
+  uint64 size   = 3;
+}

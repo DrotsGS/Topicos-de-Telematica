@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from common.pb import dfsha_pb2, dfsha_pb2_grpc     # noqa: E402
+from common.pb import comun, nn, nn_grpc, dn, dn_grpc, ctl, ctl_grpc  # noqa: E402
 from common.interfaces import FileAuth              # noqa: E402
 from namenode import server as nn_server            # noqa: E402
 from datanode import server as dn_server            # noqa: E402
@@ -59,7 +59,7 @@ def _levantar_datanode(node_id, carpeta):
     """Un DataNode con su propia carpeta de bloques."""
     servicio = dn_server.DataNodeService(str(carpeta))
     servidor = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    dfsha_pb2_grpc.add_DataNodeServiceServicer_to_server(servicio, servidor)
+    dn_grpc.add_DataNodeServiceServicer_to_server(servicio, servidor)
     puerto = servidor.add_insecure_port("localhost:0")
     servidor.start()
     return servidor, "localhost:{}".format(puerto)
@@ -79,13 +79,13 @@ def sistema(tmp_path, monkeypatch, request):
 
     servidores, canales, carpetas, direcciones = [], [], {}, {}
 
-    nn = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-    dfsha_pb2_grpc.add_NameNodeServiceServicer_to_server(servicio, nn)
-    dfsha_pb2_grpc.add_ControlServiceServicer_to_server(
-        nn_server.ControlService(servicio), nn)
-    puerto_nn = nn.add_insecure_port("localhost:0")
-    nn.start()
-    servidores.append(nn)
+    servidor_nn = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    nn_grpc.add_NameNodeServiceServicer_to_server(servicio, servidor_nn)
+    ctl_grpc.add_ControlServiceServicer_to_server(
+        nn_server.ControlService(servicio), servidor_nn)
+    puerto_nn = servidor_nn.add_insecure_port("localhost:0")
+    servidor_nn.start()
+    servidores.append(servidor_nn)
 
     for i in range(1, cuantos + 1):
         node_id = "dn-{}".format(i)
@@ -98,15 +98,15 @@ def sistema(tmp_path, monkeypatch, request):
 
     canal = grpc.insecure_channel("localhost:{}".format(puerto_nn))
     canales.append(canal)
-    control = dfsha_pb2_grpc.ControlServiceStub(canal)
+    control = ctl_grpc.ControlServiceStub(canal)
     for node_id, direccion in direcciones.items():
         # Se registran como lo hace un DataNode de verdad: por heartbeat.
-        control.Heartbeat(dfsha_pb2.HeartbeatRequest(
+        control.Heartbeat(ctl.HeartbeatRequest(
             node_id=node_id, addr=direccion,
             free_bytes=10 ** 12, num_blocks=0))
 
-    stub = dfsha_pb2_grpc.NameNodeServiceStub(canal)
-    token = stub.Login(dfsha_pb2.LoginRequest(
+    stub = nn_grpc.NameNodeServiceStub(canal)
+    token = stub.Login(nn.LoginRequest(
         user="drots", password="dfsha")).token
     monkeypatch.setattr(cli, "token", lambda: token)
 
@@ -166,7 +166,7 @@ def test_un_archivo_vacio(sistema, tmp_path):
     origen.write_bytes(b"")
     cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/vacio.bin"))
 
-    info = sistema.stub.Stat(dfsha_pb2.PathRequest(
+    info = sistema.stub.Stat(nn.PathRequest(
         path="/vacio.bin", token=sistema.token))
     assert info.num_blocks == 0 and info.size == 0
 
@@ -187,60 +187,60 @@ def test_no_se_sobreescribe(sistema, tmp_path):
     origen = archivo(tmp_path, "o.bin", 100)
     cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/f.bin"))
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Create(dfsha_pb2.CreateRequest(
+        sistema.stub.Create(nn.CreateRequest(
             path="/f.bin", size=100, token=sistema.token))
     assert e.value.code() == grpc.StatusCode.ALREADY_EXISTS
 
 
 def test_invisible_hasta_el_complete(sistema):
     """Mientras sube, el archivo no aparece en ls; stat si lo ve."""
-    r = sistema.stub.Create(dfsha_pb2.CreateRequest(
+    r = sistema.stub.Create(nn.CreateRequest(
         path="/subiendo.bin", size=10, token=sistema.token))
     assert r.lease_id
 
-    P = dfsha_pb2.PathRequest(path="/", token=sistema.token)
+    P = nn.PathRequest(path="/", token=sistema.token)
     assert list(sistema.stub.Ls(P).entries) == []
 
-    info = sistema.stub.Stat(dfsha_pb2.PathRequest(
+    info = sistema.stub.Stat(nn.PathRequest(
         path="/subiendo.bin", token=sistema.token))
-    assert info.state == dfsha_pb2.UNDER_CONSTRUCTION
+    assert info.state == comun.UNDER_CONSTRUCTION
 
 
 def test_open_de_un_archivo_en_construccion(sistema):
-    sistema.stub.Create(dfsha_pb2.CreateRequest(
+    sistema.stub.Create(nn.CreateRequest(
         path="/a medias.bin", size=10, token=sistema.token))
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Open(dfsha_pb2.PathRequest(
+        sistema.stub.Open(nn.PathRequest(
             path="/a medias.bin", token=sistema.token))
     assert e.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
 def test_complete_sin_los_checksums(sistema):
-    r = sistema.stub.Create(dfsha_pb2.CreateRequest(
+    r = sistema.stub.Create(nn.CreateRequest(
         path="/f.bin", size=BLOQUE * 2, token=sistema.token))
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Complete(dfsha_pb2.CompleteRequest(
+        sistema.stub.Complete(nn.CompleteRequest(
             path="/f.bin", lease_id=r.lease_id, checksums=[]))
     assert e.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
 def test_complete_con_un_lease_que_no_es(sistema):
-    sistema.stub.Create(dfsha_pb2.CreateRequest(
+    sistema.stub.Create(nn.CreateRequest(
         path="/f.bin", size=0, token=sistema.token))
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Complete(dfsha_pb2.CompleteRequest(
+        sistema.stub.Complete(nn.CompleteRequest(
             path="/f.bin", lease_id="inventado", checksums=[]))
     assert e.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
 def test_abort_libera_el_path(sistema):
-    r = sistema.stub.Create(dfsha_pb2.CreateRequest(
+    r = sistema.stub.Create(nn.CreateRequest(
         path="/f.bin", size=10, token=sistema.token))
-    sistema.stub.Abort(dfsha_pb2.LeaseRequest(
+    sistema.stub.Abort(nn.LeaseRequest(
         lease_id=r.lease_id, token=sistema.token))
 
     with pytest.raises(grpc.RpcError):
-        sistema.stub.Stat(dfsha_pb2.PathRequest(
+        sistema.stub.Stat(nn.PathRequest(
             path="/f.bin", token=sistema.token))
     assert sistema.servicio.pendientes_borrado == [
         b.block_id for b in r.blocks]
@@ -251,18 +251,18 @@ def test_abort_libera_el_path(sistema):
 
 def test_rm_durante_la_subida_invalida_el_lease(sistema):
     """D6 opcion (b) de punta a punta: el rm gana y el Complete falla."""
-    r = sistema.stub.Create(dfsha_pb2.CreateRequest(
+    r = sistema.stub.Create(nn.CreateRequest(
         path="/f.bin", size=10, token=sistema.token))
 
-    sistema.stub.Rm(dfsha_pb2.PathRequest(path="/f.bin", token=sistema.token))
+    sistema.stub.Rm(nn.PathRequest(path="/f.bin", token=sistema.token))
     assert sistema.servicio.leases == {}     # el lease murio con el nodo
 
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Complete(dfsha_pb2.CompleteRequest(
+        sistema.stub.Complete(nn.CompleteRequest(
             path="/f.bin", lease_id=r.lease_id, checksums=[]))
     assert e.value.code() == grpc.StatusCode.FAILED_PRECONDITION
     # Y el path quedo libre para volver a usarlo.
-    sistema.stub.Create(dfsha_pb2.CreateRequest(
+    sistema.stub.Create(nn.CreateRequest(
         path="/f.bin", size=10, token=sistema.token))
 
 
@@ -279,7 +279,7 @@ def test_una_subida_fallida_cancela_el_lease(sistema, tmp_path, monkeypatch):
 
     assert sistema.servicio.leases == {}
     with pytest.raises(grpc.RpcError):
-        sistema.stub.Stat(dfsha_pb2.PathRequest(
+        sistema.stub.Stat(nn.PathRequest(
             path="/f.bin", token=sistema.token))
 
 
@@ -288,22 +288,22 @@ def test_una_subida_fallida_cancela_el_lease(sistema, tmp_path, monkeypatch):
 def test_create_sin_datanodes_vivos(sistema):
     sistema.servicio.datanodes.clear()
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Create(dfsha_pb2.CreateRequest(
+        sistema.stub.Create(nn.CreateRequest(
             path="/f.bin", size=10, token=sistema.token))
     assert e.value.code() == grpc.StatusCode.UNAVAILABLE
 
 
 def test_create_sin_directorio_padre(sistema):
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Create(dfsha_pb2.CreateRequest(
+        sistema.stub.Create(nn.CreateRequest(
             path="/no/existe/f.bin", size=10, token=sistema.token))
     assert e.value.code() == grpc.StatusCode.NOT_FOUND
 
 
 def test_open_de_un_directorio(sistema):
-    sistema.stub.Mkdir(dfsha_pb2.PathRequest(path="/d", token=sistema.token))
+    sistema.stub.Mkdir(nn.PathRequest(path="/d", token=sistema.token))
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Open(dfsha_pb2.PathRequest(
+        sistema.stub.Open(nn.PathRequest(
             path="/d", token=sistema.token))
     assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
@@ -343,12 +343,12 @@ def test_ida_y_vuelta_con_cuatro_datanodes(sistema, tmp_path):
 
 @pytest.mark.datanodes(4)
 def test_un_datanode_muerto_desaparece_de_las_asignaciones(sistema):
-    import namenode.server as nn
-    sistema.servicio.datanodes["dn-2"]["last_seen"] -= nn.TIMEOUT_DATANODE + 1
+    from namenode import server as nn_server
+    sistema.servicio.datanodes["dn-2"]["last_seen"] -= nn_server.TIMEOUT_DATANODE + 1
     vivos = sistema.servicio.vivos()
     assert "dn-2" not in vivos and len(vivos) == 3
 
-    r = sistema.stub.Create(dfsha_pb2.CreateRequest(
+    r = sistema.stub.Create(nn.CreateRequest(
         path="/f.bin", size=10 * BLOQUE, token=sistema.token))
     muerto = sistema.servicio.datanodes["dn-2"]["addr"]
     for b in r.blocks:
@@ -357,7 +357,7 @@ def test_un_datanode_muerto_desaparece_de_las_asignaciones(sistema):
 
 @pytest.mark.datanodes(2)
 def test_open_falla_si_ningun_nodo_vivo_tiene_el_bloque(sistema, tmp_path):
-    import namenode.server as nn
+    from namenode import server as nn_server
     origen = archivo(tmp_path, "o.bin", 100)
     cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/f.bin"))
 
@@ -365,20 +365,20 @@ def test_open_falla_si_ningun_nodo_vivo_tiene_el_bloque(sistema, tmp_path):
     block_id = sistema.servicio.ns.stat("/f.bin").blocks[0]
     for node_id in sistema.servicio.block_map[block_id]["datanodes"]:
         sistema.servicio.datanodes[node_id]["last_seen"] -= \
-            nn.TIMEOUT_DATANODE + 1
+            nn_server.TIMEOUT_DATANODE + 1
 
     with pytest.raises(grpc.RpcError) as e:
-        sistema.stub.Open(dfsha_pb2.PathRequest(
+        sistema.stub.Open(nn.PathRequest(
             path="/f.bin", token=sistema.token))
     assert e.value.code() == grpc.StatusCode.UNAVAILABLE
 
 
 def test_el_archivo_subido_aparece_en_ls_con_su_tamano(sistema, tmp_path):
     origen = archivo(tmp_path, "o.bin", 1234)
-    sistema.stub.Mkdir(dfsha_pb2.PathRequest(path="/d", token=sistema.token))
+    sistema.stub.Mkdir(nn.PathRequest(path="/d", token=sistema.token))
     cli.cmd_put(sistema.stub, args(local=str(origen), remoto="/d/o.bin"))
 
-    entradas = list(sistema.stub.Ls(dfsha_pb2.PathRequest(
+    entradas = list(sistema.stub.Ls(nn.PathRequest(
         path="/d", token=sistema.token)).entries)
     assert len(entradas) == 1
     assert entradas[0].name == "o.bin" and entradas[0].size == 1234
